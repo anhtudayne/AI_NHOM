@@ -1,0 +1,33 @@
+{
+  "timestamp": "20250405_005606",  // Thời gian chạy thuật toán
+  "algorithm": "DFS",  // Tên thuật toán sử dụng
+  "map_size": {  // Kích thước bản đồ
+    "rows": 10,  // Số hàng
+    "cols": 10  // Số cột
+  },
+  "search_process": {  // Thông tin quá trình tìm kiếm
+    "steps": 73,  // Số bước thực hiện
+    "visited_cells": 86,  // Số ô đã thăm
+    "path_length": 6  // Độ dài đường đi
+  },
+  "fuel_info": {  // Thông tin nhiên liệu
+    "initial_fuel": 3.0,  // Xăng ban đầu (lít)
+    "fuel_consumed": 3.0,  // Xăng đã tiêu thụ (lít)
+    "remaining_fuel": 0  // Xăng còn lại (lít)
+  },
+  "costs": {  // Chi phí hành trình
+    "fuel_cost": 0.0,  // Chi phí nhiên liệu (đồng)
+    "toll_cost": 1005.0,  // Chi phí trạm thu phí (đồng)
+    "total_cost": 1005.0  // Tổng chi phí (đồng)
+  },
+  "performance": {  // Phân tích hiệu suất
+    "execution_time_ms": 0.33520000033604447,  // Thời gian chạy (milliseconds)
+    "memory_usage_kb": 1.34375,  // Bộ nhớ sử dụng (KB)
+    "success_rate": 0.0,  // Tỷ lệ thành công (%)
+    "solution_quality": null  // Chất lượng giải pháp (độ dài đường đi)
+  },
+  "feasibility": {  // Tính khả thi
+    "is_feasible": false,  // Đường đi có khả thi không
+    "reason": "Hết nhiên liệu trên đường đi"  // Lý do khả thi/không khả thi
+  }
+}
