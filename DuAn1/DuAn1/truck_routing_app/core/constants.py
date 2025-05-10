@@ -10,7 +10,7 @@ class CellType(IntEnum):
     ROAD = 0        # Đường thông thường
     TOLL = 1        # Trạm thu phí
     GAS = 2         # Trạm xăng
-    OBSTACLE = 3    # Vật cản
+    OBSTACLE = -1    # Vật cản
 
 @dataclass
 class MovementCosts:

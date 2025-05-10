@@ -10,9 +10,13 @@ from .base_search import BaseSearch, SearchState
 class BFS(BaseSearch):
     """Breadth-First Search algorithm implementation."""
     
-    def __init__(self, grid: np.ndarray):
-        """Initialize BFS with a grid."""
-        super().__init__(grid)
+    def __init__(self, grid: np.ndarray, initial_money: float = None, 
+                 max_fuel: float = None, fuel_per_move: float = None, 
+                 gas_station_cost: float = None, toll_base_cost: float = None,
+                 initial_fuel: float = None):
+        """Initialize BFS with a grid and configuration parameters."""
+        super().__init__(grid, initial_money, max_fuel, fuel_per_move, 
+                         gas_station_cost, toll_base_cost, initial_fuel)
         self.queue = deque()
         self.parent = {}  # Dictionary để truy vết đường đi
         self.start = None
@@ -50,47 +54,35 @@ class BFS(BaseSearch):
             
             # Nếu đến đích, truy vết đường đi và trả về
             if current_pos == goal:
-                path = self.reconstruct_path(start, goal)
+                raw_path = self.reconstruct_path(start, goal)
                 
-                # Đánh giá đường đi để tính toán nhiên liệu, chi phí và kiểm tra tính khả thi
-                evaluation_result = self.evaluate_path(path)
+                # First, validate and clean this path
+                validated_path = self.validate_path_no_obstacles(raw_path)
                 
-                if evaluation_result["is_feasible"]:
-                    self.current_path = path
-                    self.path_length = len(path) - 1
-                    self.cost = evaluation_result["total_cost"]
-                    self.current_fuel = evaluation_result["fuel_remaining"]
-                    self.current_total_cost = evaluation_result["total_cost"]
-                    self.current_fuel_cost = evaluation_result["fuel_cost"]
-                    self.current_toll_cost = evaluation_result["toll_cost"]
-                    return path
-                else:
-                    # Đường đi không khả thi (hết xăng hoặc chi phí quá cao)
-                    # Tìm điểm dừng cuối cùng trước khi hết xăng
-                    last_feasible_index = 0
-                    current_fuel = self.MAX_FUEL
-                    for i in range(len(path) - 1):
-                        current_fuel -= self.FUEL_PER_MOVE
-                        if current_fuel < 0:
-                            break
-                        last_feasible_index = i + 1
+                if not validated_path or len(validated_path) < 2:
+                    print(f"BFS: Path to goal {goal} became invalid after validation. BFS search ends.")
+                    self.current_path = [] # No valid path found through this BFS expansion
+                    return [] 
+                
+                # Second, check overall feasibility of the validated path
+                is_still_feasible, reason = self.is_path_feasible(validated_path, self.MAX_FUEL)
+                if is_still_feasible:
+                    self.current_path = validated_path
+                    self.path_length = len(self.current_path) - 1
                     
-                    # Lấy đường đi đến điểm cuối cùng có thể đến được
-                    partial_path = path[:last_feasible_index + 1]
-                    self.current_path = partial_path
-                    self.path_length = len(partial_path) - 1
-                    self.current_fuel = 0
-                    self.current_total_cost = evaluation_result["total_cost"]
-                    self.current_fuel_cost = evaluation_result["fuel_cost"]
-                    self.current_toll_cost = evaluation_result["toll_cost"]
-                    return partial_path  # Trả về đường đi một phần
+                    # Recalculate all statistics on the final, validated path
+                    self.calculate_path_fuel_consumption(self.current_path)
+                    # self.cost, self.current_fuel, etc. are updated by the above call.
+                    
+                    print(f"BFS: Valid and feasible path to {goal} found.")
+                    return self.current_path # Goal found and path is fully validated
+                else:
+                    print(f"BFS: Path to goal {goal} not feasible after validation: {reason}. BFS search ends.")
+                    self.current_path = [] # No valid path found
+                    return []
             
             # Xử lý các ô lân cận
             for next_pos in self.get_neighbors(current_pos):
-                # Kiểm tra vật cản (loại 3)
-                if self.grid[next_pos[1], next_pos[0]] == 3:
-                    continue
-                    
                 # Kiểm tra xem vị trí đã được thăm chưa
                 if next_pos not in self.visited_positions:
                     self.queue.append(next_pos)
@@ -191,13 +183,12 @@ class BFS(BaseSearch):
             self.current_fuel_cost = evaluation_result["fuel_cost"]
             self.current_toll_cost = evaluation_result["toll_cost"]
             
+            # Tính toán lượng nhiên liệu tiêu thụ cho đường đi
+            self.calculate_path_fuel_consumption(self.current_path)
+            
             return True
         
         for next_pos in self.get_neighbors(current_pos):
-            # Kiểm tra vật cản
-            if self.grid[next_pos[1], next_pos[0]] == 3:
-                continue
-                
             # Kiểm tra xem vị trí đã được thăm chưa
             if next_pos not in self.visited_positions:
                 self.queue.append(next_pos)

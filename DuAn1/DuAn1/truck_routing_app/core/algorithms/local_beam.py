@@ -12,9 +12,13 @@ from .base_search import BaseSearch, SearchState
 class LocalBeamSearch(BaseSearch):
     """Local Beam Search algorithm implementation."""
     
-    def __init__(self, grid: np.ndarray, beam_width: int = 10):
-        """Initialize Local Beam Search with a grid and beam width."""
-        super().__init__(grid)
+    def __init__(self, grid: np.ndarray, beam_width: int = 10, initial_money: float = None,
+                 max_fuel: float = None, fuel_per_move: float = None, 
+                 gas_station_cost: float = None, toll_base_cost: float = None,
+                 initial_fuel: float = None):
+        """Initialize Local Beam Search with a grid, beam width and configuration parameters."""
+        super().__init__(grid, initial_money, max_fuel, fuel_per_move, 
+                         gas_station_cost, toll_base_cost, initial_fuel)
         self.beam_width = beam_width
         self.current_states = []
         self.start = None
@@ -78,6 +82,7 @@ class LocalBeamSearch(BaseSearch):
         depth = {pos: 0}
         
         potential_toll_stations = []
+        neighbors = []  # Initialize neighbors list
         
         while queue:
             current_pos = queue.popleft()
@@ -92,20 +97,35 @@ class LocalBeamSearch(BaseSearch):
             
             # Kiểm tra các ô lân cận
             for next_pos in self.get_neighbors(current_pos):
-                # Bỏ qua ô vật cản
-                if self.grid[next_pos[1], next_pos[0]] == 3:
+                # Kiểm tra vị trí đã thăm
+                if next_pos in visited:
                     continue
                 
-                # Nếu ô chưa được thăm, thêm vào hàng đợi
-                if next_pos not in visited:
-                    visited.add(next_pos)
-                    queue.append(next_pos)
-                    depth[next_pos] = depth[current_pos] + 1
-                    
-                    # Nếu đã tìm thấy đích, dừng lại
-                    if next_pos == goal:
-                        queue.clear()
-                        break
+                # Tính chi phí và nhiên liệu mới
+                new_fuel, move_cost, new_money = self.calculate_cost(state, next_pos)
+                
+                # Kiểm tra ràng buộc
+                if new_fuel < 0 or new_money < 0:
+                    continue
+                
+                # Tạo trạng thái mới
+                new_state = SearchState(
+                    position=next_pos,
+                    fuel=new_fuel,
+                    total_cost=state.total_cost + move_cost,
+                    money=new_money,
+                    path=state.path + [next_pos],
+                    visited_gas_stations=state.visited_gas_stations.copy(),
+                    toll_stations_visited=state.toll_stations_visited.copy()
+                )
+                
+                # Cập nhật các tập đã thăm
+                if self.grid[next_pos[1], next_pos[0]] == 2:  # Trạm xăng (loại 2)
+                    new_state.visited_gas_stations.add(next_pos)
+                elif self.grid[next_pos[1], next_pos[0]] == 1:  # Trạm thu phí (loại 1)
+                    new_state.toll_stations_visited.add(next_pos)
+                
+                neighbors.append(new_state)
         
         # Tính toán thành phần heuristic cho trạm thu phí
         for toll_pos, toll_depth in potential_toll_stations:
@@ -124,15 +144,15 @@ class LocalBeamSearch(BaseSearch):
         neighbors = []
         
         for next_pos in self.get_neighbors(current_state.position):
-            # Kiểm tra vật cản
-            if self.grid[next_pos[1], next_pos[0]] == 3:  # Nếu là vật cản (loại 3)
+            # Kiểm tra vị trí đã thăm
+            if next_pos in self.visited:
                 continue
                 
             # Tính toán chi phí và nhiên liệu cho bước tiếp theo
-            new_fuel, move_cost = self.calculate_cost(current_state, next_pos)
+            new_fuel, move_cost, new_money = self.calculate_cost(current_state, next_pos)
             
             # Kiểm tra tính khả thi của bước tiếp theo
-            if new_fuel < 0 or current_state.total_cost + move_cost > self.MAX_TOTAL_COST:
+            if new_fuel < 0 or new_money < 0 or current_state.total_cost + move_cost > self.MAX_TOTAL_COST:
                 continue
             
             # Tạo trạng thái mới
@@ -140,15 +160,16 @@ class LocalBeamSearch(BaseSearch):
                 position=next_pos,
                 fuel=new_fuel,
                 total_cost=current_state.total_cost + move_cost,
+                money=new_money,
                 path=current_state.path + [next_pos],
                 visited_gas_stations=current_state.visited_gas_stations.copy(),
                 toll_stations_visited=current_state.toll_stations_visited.copy()
             )
             
             # Cập nhật các tập đã thăm
-            if self.grid[next_pos[1], next_pos[0]] == 2:  # Trạm xăng (loại 2 thay vì 'G')
+            if self.grid[next_pos[1], next_pos[0]] == 2:  # Trạm xăng (loại 2)
                 new_state.visited_gas_stations.add(next_pos)
-            elif self.grid[next_pos[1], next_pos[0]] == 1:  # Trạm thu phí (loại 1 thay vì 'T')
+            elif self.grid[next_pos[1], next_pos[0]] == 1:  # Trạm thu phí (loại 1)
                 new_state.toll_stations_visited.add(next_pos)
             
             neighbors.append(new_state)
@@ -190,7 +211,9 @@ class LocalBeamSearch(BaseSearch):
         return [states[i] for i in selected_indices]
     
     def search(self, start: Tuple[int, int], goal: Tuple[int, int]) -> List[Tuple[int, int]]:
-        """Execute Local Beam Search from start to goal."""
+        """Thực hiện thuật toán Local Beam Search từ vị trí bắt đầu đến đích.
+        Theo mã giả cung cấp bởi người dùng.
+        """
         self.start = start
         self.goal = goal
         self.visited.clear()
@@ -202,12 +225,14 @@ class LocalBeamSearch(BaseSearch):
         self.current_total_cost = 0
         self.current_fuel_cost = 0
         self.current_toll_cost = 0
+        self.current_money = self.MAX_MONEY
         
-        # Tạo trạng thái ban đầu
+        # Khởi tạo chùm tia với trạng thái ban đầu
         initial_state = SearchState(
             position=start,
             fuel=self.MAX_FUEL,
             total_cost=0,
+            money=self.MAX_MONEY,
             path=[start],
             visited_gas_stations=set(),
             toll_stations_visited=set()
@@ -220,67 +245,123 @@ class LocalBeamSearch(BaseSearch):
         
         # Tập các trạng thái đã xử lý (để tránh lặp lại)
         processed_states = set()
+        processed_states.add(initial_state.get_state_key())
         
-        while self.current_states:
+        # Vòng lặp cho đến khi tìm thấy đích hoặc không thể đi tiếp
+        while self.current_states and self.steps < 2000:  # Giới hạn số bước
             self.steps += 1
-            
-            # Kiểm tra xem có trạng thái nào đã đến đích không
+            next_generation_states = []
+            goal_found_and_validated = False
+
             for state in self.current_states:
-                if state.position == goal:
-                    # Kiểm tra tính khả thi của đường đi
-                    is_feasible, reason = self.is_path_feasible(state.path, self.MAX_FUEL)
-                    if is_feasible:
-                        self.current_path = state.path
-                        self.path_length = len(self.current_path) - 1
-                        self.cost = state.total_cost
-                        self.current_fuel = state.fuel
-                        self.current_total_cost = state.total_cost
-                        self.current_fuel_cost = state.total_cost - self.current_toll_cost
-                        return self.current_path
-            
-            # Tạo danh sách tất cả các trạng thái kế tiếp
-            all_neighbors = []
-            for state in self.current_states:
-                # Thêm trạng thái này vào tập đã xử lý
-                processed_states.add(state.get_state_key())
+                # Nếu đã tìm thấy đích
+                if state.position == self.goal:
+                    raw_path = state.path
+
+                    # First, validate and clean this path
+                    validated_path = self.validate_path_no_obstacles(raw_path)
+
+                    if not validated_path or len(validated_path) < 2:
+                        print(f"LOCAL BEAM: Path to goal became invalid or too short after validation. Continuing search.")
+                        continue # Try other states in beam or next generation
+
+                    # Second, check overall feasibility of the validated path
+                    is_still_feasible, reason = self.is_path_feasible(validated_path, self.MAX_FUEL)
+                    if not is_still_feasible:
+                        print(f"LOCAL BEAM: Path to goal after validation is not feasible: {reason}. Continuing search.")
+                        continue # Try other states in beam or next generation
+                    
+                    # If all checks pass, this is our definitive path
+                    self.current_path = validated_path
+                    self.path_length = len(self.current_path) - 1
+                    
+                    # Recalculate all statistics on the final, validated path
+                    self.calculate_path_fuel_consumption(self.current_path)
+                    # self.cost, self.current_fuel, etc. are updated by the above call.
+                    
+                    print(f"Local Beam Search: Đã tìm thấy đường đi đến đích sau {self.steps} bước.")
+                    goal_found_and_validated = True
+                    return self.current_path # Return the first validated path to goal
+
+                # Lấy các trạng thái lân cận
+                successors = self.get_neighbor_states(state)
                 
-                # Lấy tất cả trạng thái lân cận
-                neighbors = self.get_neighbor_states(state)
-                
-                # Lọc bỏ các trạng thái đã xử lý
-                valid_neighbors = [n for n in neighbors if n.get_state_key() not in processed_states]
-                all_neighbors.extend(valid_neighbors)
+                # Thêm vào danh sách các trạng thái kế tiếp
+                next_generation_states.extend(successors)
             
-            if not all_neighbors:
+            # Nếu không còn trạng thái nào trong chùm tia, dừng lại
+            if not self.current_states:
+                print("Local Beam Search: Không còn trạng thái nào để khám phá.")
                 break
             
-            # Chọn k trạng thái tốt nhất theo phương pháp ngẫu nhiên hoặc đơn thuần
-            if self.use_stochastic:
-                self.current_states = self.select_states_stochastic(all_neighbors, goal, self.beam_width)
-            else:
-                # Sắp xếp các trạng thái kế tiếp theo heuristic có xét đến nhiên liệu
-                all_neighbors.sort(key=lambda x: self.heuristic_with_fuel(x, goal))
-                # Chọn k trạng thái tốt nhất
-                self.current_states = all_neighbors[:self.beam_width]
+            # Lọc bỏ các trạng thái lân cận đã xử lý đầy đủ
+            valid_neighbors = []
+            for neighbor in next_generation_states:
+                if neighbor.get_state_key() not in processed_states:
+                    valid_neighbors.append(neighbor)
+                    processed_states.add(neighbor.get_state_key())
             
-            # Cập nhật vị trí hiện tại và danh sách đã thăm
+            # Nếu không còn trạng thái lân cận hợp lệ
+            if not valid_neighbors:
+                break
+            
+            # Chọn BeamWidth trạng thái tiếp theo theo phương pháp
+            if self.use_stochastic:
+                # Theo phân phối xác suất (Stochastic)
+                self.current_states = self.select_states_stochastic(valid_neighbors, self.goal, self.beam_width)
+            else:
+                # Chọn BeamWidth trạng thái tốt nhất theo heuristic (Deterministically)
+                valid_neighbors.sort(key=lambda x: self.heuristic_with_fuel(x, self.goal))
+                self.current_states = valid_neighbors[:self.beam_width]
+            
+            # Cập nhật các trạng thái đã thăm cho visualization
+            for state in self.current_states:
+                if state.position not in self.visited:
+                    self.visited.append(state.position)
+            
+            # Cập nhật vị trí hiện tại cho visualization
             if self.current_states:
                 self.current_position = self.current_states[0].position
-                for state in self.current_states:
-                    if state.position not in self.visited:
-                        self.visited.append(state.position)
         
-        return []  # No path found
+        # Nếu vòng lặp kết thúc mà không tìm được đích (và trả về từ bên trong)
+        print("Local Beam Search: Không tìm thấy đường đi đến đích hoặc không có đường đi hợp lệ.")
+        self.current_path = []
+        return []
     
     def step(self) -> bool:
         """Execute one step of Local Beam Search."""
+        if not self.start or not self.goal:
+            return True  # Finished (not initialized)
+        
+        # Khởi tạo chùm tia nếu chưa có
+        if not hasattr(self, 'processed_states'):
+            self.processed_states = set()
+            
+            if not self.current_states:
+                # Tạo trạng thái ban đầu
+                initial_state = SearchState(
+                    position=self.start,
+                    fuel=self.MAX_FUEL,
+                    total_cost=0,
+                    money=self.MAX_MONEY,
+                    path=[self.start],
+                    visited_gas_stations=set(),
+                    toll_stations_visited=set()
+                )
+                
+                self.current_states = [initial_state]
+                self.processed_states.add(initial_state.get_state_key())
+                self.visited.append(self.start)
+                self.current_position = self.start
+        
+        # Nếu không còn trạng thái nào để xét
         if not self.current_states:
             self.current_position = None
             return True
         
         self.steps += 1
         
-        # Kiểm tra xem có trạng thái nào đã đến đích không
+        # Kiểm tra nếu có trạng thái đạt đích
         for state in self.current_states:
             if state.position == self.goal:
                 # Kiểm tra tính khả thi của đường đi
@@ -292,40 +373,57 @@ class LocalBeamSearch(BaseSearch):
                     self.current_fuel = state.fuel
                     self.current_total_cost = state.total_cost
                     self.current_fuel_cost = state.total_cost - self.current_toll_cost
+                    
+                    # Tính toán lượng nhiên liệu tiêu thụ cho đường đi
+                    self.calculate_path_fuel_consumption(self.current_path)
+                    
                     self.current_states = []
                     self.current_position = None
                     return True
         
-        # Tập các trạng thái đã xử lý (để tránh lặp lại)
-        processed_states = set([state.get_state_key() for state in self.current_states])
-        
-        # Tạo danh sách tất cả các trạng thái kế tiếp
+        # Tạo danh sách tất cả các trạng thái lân cận
         all_neighbors = []
-        for state in self.current_states:
-            neighbors = self.get_neighbor_states(state)
-            # Lọc bỏ các trạng thái đã xử lý
-            valid_neighbors = [n for n in neighbors if n.get_state_key() not in processed_states]
-            all_neighbors.extend(valid_neighbors)
         
+        # Mở rộng tất cả các trạng thái trong chùm tia hiện tại
+        for state in self.current_states:
+            # Lấy tất cả trạng thái lân cận
+            neighbors = self.get_neighbor_states(state)
+            all_neighbors.extend(neighbors)
+        
+        # Nếu không có trạng thái lân cận nào
         if not all_neighbors:
             self.current_states = []
             self.current_position = None
             return True
         
-        # Chọn k trạng thái tốt nhất theo phương pháp ngẫu nhiên hoặc đơn thuần
-        if self.use_stochastic:
-            self.current_states = self.select_states_stochastic(all_neighbors, self.goal, self.beam_width)
-        else:
-            # Sắp xếp các trạng thái kế tiếp theo heuristic có xét đến nhiên liệu
-            all_neighbors.sort(key=lambda x: self.heuristic_with_fuel(x, self.goal))
-            # Chọn k trạng thái tốt nhất
-            self.current_states = all_neighbors[:self.beam_width]
+        # Lọc bỏ các trạng thái lân cận đã xử lý
+        valid_neighbors = []
+        for neighbor in all_neighbors:
+            if neighbor.get_state_key() not in self.processed_states:
+                valid_neighbors.append(neighbor)
+                self.processed_states.add(neighbor.get_state_key())
         
-        # Cập nhật vị trí hiện tại và danh sách đã thăm
+        # Nếu không còn trạng thái lân cận hợp lệ
+        if not valid_neighbors:
+            self.current_states = []
+            self.current_position = None
+            return True
+        
+        # Chọn BeamWidth trạng thái tiếp theo
+        if self.use_stochastic:
+            # Chọn theo phân phối xác suất (Stochastic)
+            self.current_states = self.select_states_stochastic(valid_neighbors, self.goal, self.beam_width)
+        else:
+            # Chọn BeamWidth trạng thái tốt nhất theo heuristic
+            valid_neighbors.sort(key=lambda x: self.heuristic_with_fuel(x, self.goal))
+            self.current_states = valid_neighbors[:self.beam_width]
+        
+        # Cập nhật trạng thái đã thăm và vị trí hiện tại cho visualization
+        for state in self.current_states:
+            if state.position not in self.visited:
+                self.visited.append(state.position)
+        
         if self.current_states:
             self.current_position = self.current_states[0].position
-            for state in self.current_states:
-                if state.position not in self.visited:
-                    self.visited.append(state.position)
-        
+            
         return False 

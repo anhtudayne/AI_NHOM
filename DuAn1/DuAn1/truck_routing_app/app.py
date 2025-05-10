@@ -7,6 +7,7 @@ import streamlit as st
 from ui.home import render_home
 from ui.map_config import render_map_config
 from ui.routing_visualization import render_routing_visualization
+from ui.algorithm_evaluation import render_evaluation_page
 
 def main():
     # Thiết lập cấu hình trang
@@ -107,7 +108,7 @@ def main():
         st.markdown("## Điều hướng")
         page = st.radio(
             "Chọn trang:",
-            ["Trang chủ", "Tạo Bản Đồ & Cấu Hình", "Định Tuyến & Tối Ưu Hệ Thống"]
+            ["Trang chủ", "Tạo Bản Đồ & Cấu Hình", "Định Tuyến & Tối Ưu Hệ Thống", "Đánh Giá Thuật Toán"]
         )
         
         # Thông tin ứng dụng
@@ -141,6 +142,8 @@ def main():
         render_map_config()
     elif page == "Định Tuyến & Tối Ưu Hệ Thống":
         render_routing_visualization()
+    elif page == "Đánh Giá Thuật Toán":
+        render_evaluation_page()
 
 if __name__ == "__main__":
     main()

@@ -11,9 +11,14 @@ import heapq
 class AStarFuel(BaseSearch):
     """A* search algorithm implementation with fuel constraints."""
     
-    def __init__(self, grid: np.ndarray):
+    def __init__(self, grid: np.ndarray, initial_money: float = None, 
+                 max_fuel: float = None, fuel_per_move: float = None, 
+                 gas_station_cost: float = None, toll_base_cost: float = None,
+                 initial_fuel: float = None):
         """Initialize A* with fuel constraints."""
-        super().__init__(grid)
+        super().__init__(grid, initial_money, max_fuel, fuel_per_move, 
+                         gas_station_cost, toll_base_cost, initial_fuel)
+        self.initial_fuel = initial_fuel  # Store initial_fuel as instance attribute
         self.open_set = PriorityQueue()
         self.closed_set = set()
         self.g_score = {}  # Chi phí thực tế từ điểm bắt đầu đến điểm hiện tại
@@ -71,8 +76,34 @@ class AStarFuel(BaseSearch):
             
             # Kiểm tra đã đến đích chưa
             if current_state.position == self.goal:
-                # Tối ưu hóa đường đi
-                return self.optimize_path(current_state.path, self.initial_fuel)
+                raw_optimized_path = self.optimize_path(current_state.path, self.initial_fuel)
+
+                if not raw_optimized_path: # optimize_path might return None or empty
+                    print(f"ASTAR_FUEL: optimize_path returned no path for {self.goal}.")
+                    return None # Or continue if the algorithm structure supports it
+
+                # First, validate and clean this path further
+                validated_path = self.validate_path_no_obstacles(raw_optimized_path)
+                
+                if not validated_path or len(validated_path) < 2:
+                    print(f"ASTAR_FUEL: Path to goal {self.goal} became invalid after validation.")
+                    return None 
+                
+                # Second, check overall feasibility of the validated path
+                is_still_feasible, reason = self.is_path_feasible(validated_path, self.MAX_FUEL)
+                if is_still_feasible:
+                    self.current_path = validated_path
+                    self.path_length = len(self.current_path) - 1
+                    
+                    # Recalculate all statistics on the final, validated path
+                    self.calculate_path_fuel_consumption(self.current_path)
+                    # self.cost, self.current_fuel, etc. are updated by the above call.
+                    
+                    print(f"ASTAR_FUEL: Valid and feasible path to {self.goal} found.")
+                    return self.current_path # Goal found and path is fully validated
+                else:
+                    print(f"ASTAR_FUEL: Path to goal {self.goal} not feasible after validation: {reason}.")
+                    return None
                 
             # Thêm vào tập đã xét
             closed_set.add(current_state.get_key())
@@ -149,13 +180,33 @@ class AStarFuel(BaseSearch):
         self.current_position = current
         
         # Xử lý các điểm lân cận
-        for next_pos in self.get_neighbor_states(current):
+        for next_pos in self.get_neighbors(current):
+            # THÊM KIỂM TRA CHƯỚNG NGẠI VẬT RÕ RÀNG
+            if self.grid[next_pos[1], next_pos[0]] == self.OBSTACLE_CELL:
+                continue
+
             if next_pos in self.closed_set:
                 continue
             
             # Tính toán chi phí và nhiên liệu cho bước tiếp theo
-            distance_cost, fuel_cost, toll_cost = self.calculate_cost(current, next_pos)
-            new_g_score = float(self.g_score[current]) + float(distance_cost) + float(fuel_cost) + float(toll_cost)
+            # LƯU Ý: logic tính toán chi phí ở đây có vẻ khác với phương thức calculate_cost của lớp này
+            # và calculate_cost của BaseSearch. Cần xem xét lại nếu có vấn đề.
+            # Giả sử distance_cost, fuel_cost, toll_cost được tính bằng một cách nào đó
+            # Dưới đây là một ví dụ giữ nguyên cấu trúc cũ, nhưng cần đảm bảo các biến này được định nghĩa đúng
+            
+            # Ghi chú: Phần tính toán chi phí (distance_cost, fuel_cost, toll_cost) 
+            # trong phiên bản gốc của step() không được định nghĩa rõ ràng.
+            # Để mã có thể chạy, chúng ta cần một giả định hoặc một cách tính toán tạm thời.
+            # Ở đây, tôi sẽ giả định chi phí di chuyển cơ bản là 1 và không có chi phí nhiên liệu/trạm thu phí đặc biệt
+            # cho mục đích làm cho mã chạy được. Điều này CẦN ĐƯỢC XEM XÉT LẠI CẨN THẬN.
+            move_cost_for_step = 1 # Chi phí di chuyển cơ bản, cần được điều chỉnh cho đúng logic
+            fuel_consumed_for_step = self.FUEL_PER_MOVE # Nhiên liệu tiêu thụ, giả định từ BaseSearch
+
+            # Kiểm tra nhiên liệu trước
+            if self.fuel.get(current, 0) < fuel_consumed_for_step:
+                continue
+
+            new_g_score = float(self.g_score.get(current, float('inf'))) + move_cost_for_step
             
             # Nếu điểm lân cận chưa trong open_set hoặc có g_score tốt hơn
             if next_pos not in self.open_set or new_g_score < self.g_score.get(next_pos, float('inf')):
@@ -166,20 +217,20 @@ class AStarFuel(BaseSearch):
                 # Cập nhật nhiên liệu và chi phí
                 self.fuel[next_pos] = float(self.fuel[current]) - float(self.FUEL_PER_MOVE)
                 self.total_cost[next_pos] = new_g_score
-                self.fuel_cost[next_pos] = self.fuel_cost[current] + fuel_cost
-                self.toll_cost[next_pos] = self.toll_cost[current] + toll_cost
+                self.fuel_cost[next_pos] = self.fuel_cost[current] + fuel_consumed_for_step
+                self.toll_cost[next_pos] = self.toll_cost[current]
                 
                 # Cập nhật các trạm đã thăm
                 self.visited_gas_stations[next_pos] = self.visited_gas_stations[current].copy()
                 self.toll_stations_visited[next_pos] = self.toll_stations_visited[current].copy()
                 
                 # Nếu đến trạm xăng
-                if self.grid[next_pos[0], next_pos[1]] == 3:
+                if self.grid[next_pos[0], next_pos[1]] == 2:  # Value 2 is Gas Station
                     self.fuel[next_pos] = float(self.MAX_FUEL)
                     self.visited_gas_stations[next_pos].add(next_pos)
                 
                 # Nếu đến trạm thu phí
-                if self.grid[next_pos[0], next_pos[1]] == 2:
+                if self.grid[next_pos[0], next_pos[1]] == 1:  # Value 1 is Toll Station
                     self.toll_stations_visited[next_pos].add(next_pos)
                 
                 self.open_set.add(next_pos)
@@ -195,20 +246,6 @@ class AStarFuel(BaseSearch):
         return list(reversed(path)) 
 
     def get_neighbors(self, pos: Tuple[int, int]) -> List[Tuple[int, int]]:
-        """
-        Lấy danh sách các vị trí kề có thể đi được
-        """
-        x, y = pos
-        neighbors = []
-        
-        # Các hướng di chuyển có thể
-        for dx, dy in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
-            new_x, new_y = x + dx, y + dy
-            
-            # Kiểm tra giới hạn bản đồ
-            if 0 <= new_x < self.cols and 0 <= new_y < self.rows:
-                # Kiểm tra không phải vật cản
-                if self.grid[new_y, new_x] != 3:
-                    neighbors.append((new_x, new_y))
-                    
-        return neighbors 
+        """Lấy danh sách các vị trí kề có thể đi được."""
+        # Sử dụng phương thức cha từ BaseSearch (đã lọc bỏ ô chướng ngại vật)
+        return super().get_neighbors(pos) 

@@ -17,9 +17,13 @@ class DFS(BaseSearch):
     MAX_TOTAL_COST = 5000.0 # Chi phí tối đa cho phép
     ROAD_WEIGHT = 1.0       # Chi phí cơ bản cho mỗi bước di chuyển
     
-    def __init__(self, grid: np.ndarray):
-        """Initialize DFS with a grid."""
-        super().__init__(grid)
+    def __init__(self, grid: np.ndarray, initial_money: float = None, 
+                 max_fuel: float = None, fuel_per_move: float = None, 
+                 gas_station_cost: float = None, toll_base_cost: float = None,
+                 initial_fuel: float = None):
+        """Initialize DFS with a grid and configuration parameters."""
+        super().__init__(grid, initial_money, max_fuel, fuel_per_move, 
+                         gas_station_cost, toll_base_cost, initial_fuel)
         self.stack = []
         self.parent = {}  # Dictionary để truy vết đường đi
         self.start = None
@@ -57,47 +61,35 @@ class DFS(BaseSearch):
             
             # Nếu đến đích, truy vết đường đi và trả về
             if current_pos == goal:
-                path = self.reconstruct_path(start, goal)
+                raw_path = self.reconstruct_path(start, goal)
                 
-                # Đánh giá đường đi để tính toán nhiên liệu, chi phí và kiểm tra tính khả thi
-                evaluation_result = self.evaluate_path(path)
+                # First, validate and clean this path
+                validated_path = self.validate_path_no_obstacles(raw_path)
                 
-                if evaluation_result["is_feasible"]:
-                    self.current_path = path
-                    self.path_length = len(path) - 1
-                    self.cost = evaluation_result["total_cost"]
-                    self.current_fuel = evaluation_result["fuel_remaining"]
-                    self.current_total_cost = evaluation_result["total_cost"]
-                    self.current_fuel_cost = evaluation_result["fuel_cost"]
-                    self.current_toll_cost = evaluation_result["toll_cost"]
-                    return path
+                if not validated_path or len(validated_path) < 2:
+                    # Path became invalid or too short after validation, DFS should backtrack/continue
+                    print(f"DFS: Path to goal {goal} became invalid after validation. Continuing search.")
+                    # continue # In DFS, popping continues the loop, effectively backtracking if other branches exist
                 else:
-                    # Đường đi không khả thi (hết xăng hoặc chi phí quá cao)
-                    # Tìm điểm dừng cuối cùng trước khi hết xăng
-                    last_feasible_index = 0
-                    current_fuel = self.MAX_FUEL
-                    for i in range(len(path) - 1):
-                        current_fuel -= self.FUEL_PER_MOVE
-                        if current_fuel < 0:
-                            break
-                        last_feasible_index = i + 1
-                    
-                    # Lấy đường đi đến điểm cuối cùng có thể đến được
-                    partial_path = path[:last_feasible_index + 1]
-                    self.current_path = partial_path
-                    self.path_length = len(partial_path) - 1
-                    self.current_fuel = 0
-                    self.current_total_cost = evaluation_result["total_cost"]
-                    self.current_fuel_cost = evaluation_result["fuel_cost"]
-                    self.current_toll_cost = evaluation_result["toll_cost"]
-                    return partial_path  # Trả về đường đi một phần
+                    # Second, check overall feasibility of the validated path
+                    is_still_feasible, reason = self.is_path_feasible(validated_path, self.MAX_FUEL)
+                    if is_still_feasible:
+                        self.current_path = validated_path
+                        self.path_length = len(self.current_path) - 1
+                        
+                        # Recalculate all statistics on the final, validated path
+                        self.calculate_path_fuel_consumption(self.current_path)
+                        # self.cost, self.current_fuel, etc. are updated by the above call.
+                        
+                        print(f"DFS: Valid and feasible path to {goal} found.")
+                        return self.current_path # Goal found and path is fully validated
+                    else:
+                        print(f"DFS: Path to goal {goal} not feasible after validation: {reason}. Continuing search.")
+                        # Path not feasible, DFS should backtrack/continue searching
+                        # continue 
             
             # Xử lý các ô lân cận
             for next_pos in reversed(self.get_neighbors(current_pos)):
-                # Kiểm tra vật cản (loại 3)
-                if self.grid[next_pos[1], next_pos[0]] == 3:
-                    continue
-                    
                 # Kiểm tra xem vị trí đã được thăm chưa
                 if next_pos not in self.visited_positions:
                     self.stack.append(next_pos)
@@ -196,13 +188,12 @@ class DFS(BaseSearch):
             self.current_fuel_cost = evaluation_result["fuel_cost"]
             self.current_toll_cost = evaluation_result["toll_cost"]
             
+            # Tính toán lượng nhiên liệu tiêu thụ cho đường đi
+            self.calculate_path_fuel_consumption(self.current_path)
+            
             return True
         
         for next_pos in reversed(self.get_neighbors(current_pos)):
-            # Kiểm tra vật cản
-            if self.grid[next_pos[1], next_pos[0]] == 3:
-                continue
-                
             # Kiểm tra xem vị trí đã được thăm chưa
             if next_pos not in self.visited_positions:
                 self.stack.append(next_pos)

@@ -9,10 +9,16 @@ import os
 import numpy as np
 import io
 import math
-
+from core.algorithms.base_search import OBSTACLE_CELL, ROAD_CELL, TOLL_CELL, GAS_STATION_CELL
 
 # Đường dẫn tới các icon
 ICONS_PATH = os.path.join(os.path.dirname(__file__), 'units')
+
+# Hằng số xác định loại ô
+OBSTACLE_VALUE = OBSTACLE_CELL  # Đồng bộ với base_search.py
+ROAD_VALUE = ROAD_CELL
+TOLL_VALUE = TOLL_CELL
+GAS_STATION_VALUE = GAS_STATION_CELL
 
 def create_basic_icon(emoji, size=(64, 64), bg_color=None):
     """
@@ -196,7 +202,7 @@ def _draw_map_simple(map_data, start_pos=None):
                 emoji = emojis['toll']
             elif cell_type == 2:
                 emoji = emojis['gas']
-            elif cell_type == 3:
+            elif cell_type == -1:
                 emoji = emojis['brick']
             else:
                 emoji = emojis['road']
@@ -207,34 +213,201 @@ def _draw_map_simple(map_data, start_pos=None):
     # Hiển thị bản đồ dạng bảng
     st.table(map_table)
 
+def get_grid_from_map_data(map_data):
+    """Trích xuất grid từ map_data một cách nhất quán."""
+    if hasattr(map_data, 'grid'):
+        return map_data.grid
+    return map_data
+
+def is_valid_position(grid, pos):
+    """Kiểm tra một vị trí có nằm trong lưới hợp lệ không."""
+    try:
+        return (0 <= pos[0] < grid.shape[1] and 0 <= pos[1] < grid.shape[0])
+    except:
+        return False
+
+def is_obstacle_cell(grid, pos):
+    """Kiểm tra một ô có phải là chướng ngại vật không."""
+    try:
+        if not is_valid_position(grid, pos):
+            return True  # Coi như ô ngoài biên là chướng ngại vật
+        return grid[pos[1], pos[0]] == OBSTACLE_VALUE
+    except Exception as e:
+        print(f"Error checking cell at {pos}: {str(e)}")
+        return True  # Coi như ô lỗi là chướng ngại vật để an toàn
+
+def filter_obstacle_cells(grid, positions):
+    """
+    Lọc bỏ các ô chướng ngại vật từ danh sách vị trí đầu vào.
+    Chỉ loại bỏ các ô là chướng ngại vật, không cố gắng sửa chữa tính liên tục.
+    
+    Args:
+        grid: Lưới chứa thông tin về các ô
+        positions: Danh sách các vị trí cần kiểm tra
+        
+    Returns:
+        List[Tuple[int, int]]: Danh sách các vị trí mà không chứa ô chướng ngại vật
+    """
+    if not positions or len(positions) < 1:
+        return positions
+    
+    # Lọc bỏ các ô chướng ngại vật
+    filtered = []
+    obstacles_found = False
+    obstacles_count = 0
+    
+    for pos in positions:
+        # Kiểm tra tính hợp lệ của vị trí
+        if not is_valid_position(grid, pos):
+            print(f"WARNING: Vị trí {pos} nằm ngoài lưới, bỏ qua.")
+            obstacles_found = True
+            obstacles_count += 1
+            continue
+            
+        # Kiểm tra chắc chắn rằng ô không phải là chướng ngại vật
+        if not is_obstacle_cell(grid, pos):
+            filtered.append(pos)
+        else:
+            obstacles_found = True
+            obstacles_count += 1
+            print(f"CẢNH BÁO: Lọc bỏ ô chướng ngại vật tại {pos}")
+    
+    if obstacles_found:
+        print(f"CẢNH BÁO: Đã phát hiện và lọc bỏ {obstacles_count} ô chướng ngại vật từ danh sách có {len(positions)} vị trí")
+        if obstacles_count > 0:
+            st.warning(f"⚠️ Đã phát hiện và lọc bỏ {obstacles_count} ô chướng ngại vật")
+    
+    return filtered
+
+def find_path_between(grid, start, end):
+    """
+    Tìm đường đi ngắn nhất giữa hai điểm không liền kề sử dụng BFS.
+    Chỉ đi qua các ô không phải chướng ngại vật.
+    """
+    if start == end:
+        return [start]
+    
+    from collections import deque
+    
+    # Sử dụng BFS để tìm đường đi
+    queue = deque([(start, [start])])
+    visited = set([start])
+    
+    # Các hướng di chuyển: lên, phải, xuống, trái
+    directions = [(0, -1), (1, 0), (0, 1), (-1, 0)]
+    
+    while queue:
+        (current, path) = queue.popleft()
+        
+        # Lấy các ô liền kề
+        for dx, dy in directions:
+            next_x, next_y = current[0] + dx, current[1] + dy
+            next_pos = (next_x, next_y)
+            
+            # Kiểm tra ô có hợp lệ không
+            if not is_valid_position(grid, next_pos):
+                continue
+                
+            # Kiểm tra không phải ô chướng ngại vật
+            if is_obstacle_cell(grid, next_pos):
+                continue
+                
+            # Kiểm tra đã đến đích chưa
+            if next_pos == end:
+                return path + [end]
+            
+            # Kiểm tra đã thăm chưa
+            if next_pos not in visited:
+                visited.add(next_pos)
+                queue.append((next_pos, path + [next_pos]))
+                
+                # Giới hạn tìm kiếm để tránh trường hợp không tìm thấy đường đi
+                if len(visited) > 1000:
+                    return None
+    
+    # Không tìm thấy đường đi
+    return None
+
 def draw_map(map_data, start_pos=None, visited=None, current_neighbors=None, current_pos=None, path=None):
     """
     Vẽ bản đồ với các icon sử dụng thành phần bản địa của Streamlit
     
     Parameters:
     - map_data: Đối tượng Map chứa thông tin bản đồ
-    - start_pos: Tuple (row, col) chỉ vị trí bắt đầu của xe (nếu có)
-    - visited: List các vị trí đã thăm
-    - current_neighbors: List các vị trí hàng xóm đang xét
-    - current_pos: Tuple (row, col) chỉ vị trí hiện tại
-    - path: List các vị trí trên đường đi tìm được
+    - start_pos: Tuple (row, col) chỉ vị trí bắt đầu của xe (nếu có) - LƯU Ý: API này nhận (row, col) nhưng nên nhất quán (x,y)
+    - visited: List các vị trí đã thăm (x,y)
+    - current_neighbors: List các vị trí hàng xóm đang xét (x,y)
+    - current_pos: Tuple (x,y) chỉ vị trí hiện tại
+    - path: List các vị trí (x,y) trên đường đi tìm được
     """
     try:
-        grid = map_data.grid
-        size = grid.shape[0]
+        # Lấy grid từ map_data một cách nhất quán
+        grid = get_grid_from_map_data(map_data)
+        size = grid.shape[0] # Giả sử là bản đồ vuông
         
-        # Sử dụng start_pos từ tham số nếu được cung cấp, nếu không lấy từ map_data
-        if start_pos is None and hasattr(map_data, 'start_pos'):
-            start_pos = map_data.start_pos
+        # KIỂM TRA KHẨN CẤP: Đảm bảo đường đi không chứa chướng ngại vật
+        if path:
+            obstacles_in_path = []
+            for pos_xy in path: # path chứa (x,y)
+                if is_obstacle_cell(grid, pos_xy): # is_obstacle_cell nhận (x,y)
+                    obstacles_in_path.append(pos_xy)
             
-        # Lấy end_pos từ map_data nếu có
-        end_pos = None
-        if hasattr(map_data, 'end_pos'):
-            end_pos = map_data.end_pos
+            if obstacles_in_path:
+                st.error(f"❌ LỖI NGHIÊM TRỌNG: Đường đi chứa {len(obstacles_in_path)} ô chướng ngại vật tại vị trí: {obstacles_in_path[:5]}{'...' if len(obstacles_in_path) > 5 else ''}")
+                st.warning("⚠️ Đường đi không hợp lệ! Có lỗi nghiêm trọng trong thuật toán tìm đường! Kiểm tra lại thuật toán và phương thức validate_path_no_obstacles.")
+        
+        # Lọc tất cả các danh sách vị trí để đảm bảo không có ô chướng ngại vật
+        # filter_obstacle_cells nhận (grid, list_of_xy_positions)
+        if path:
+            original_path_len = len(path)
+            filtered_path_display_only = filter_obstacle_cells(grid, path) # Dùng để hiển thị lỗi, không thay đổi path gốc
+            if len(filtered_path_display_only) < original_path_len:
+                st.error(f"⚠️ LỖI HIỂN THỊ: Đường đi chứa {original_path_len - len(filtered_path_display_only)} ô chướng ngại vật bị lọc bởi filter_obstacle_cells!")
+                print(f"CRITICAL: draw_map's filter_obstacle_cells removed {original_path_len - len(filtered_path_display_only)} obstacles from path for display purposes!")
+            
+        if visited:
+            original_visited_len = len(visited)
+            # visited được truyền vào là list (x,y)
+            visited_for_display = filter_obstacle_cells(grid, visited) # visited_for_display giờ là list (x,y) đã lọc
+            if len(visited_for_display) < original_visited_len:
+                print(f"Đã lọc bỏ {original_visited_len - len(visited_for_display)} ô chướng ngại vật từ danh sách đã thăm (hiển thị)")
+        else:
+            visited_for_display = []
+
+        if current_neighbors:
+            original_neighbors_len = len(current_neighbors)
+            # current_neighbors được truyền vào là list (x,y)
+            current_neighbors_for_display = filter_obstacle_cells(grid, current_neighbors) # current_neighbors_for_display là (x,y) đã lọc
+            if len(current_neighbors_for_display) < original_neighbors_len:
+                print(f"Đã lọc bỏ {original_neighbors_len - len(current_neighbors_for_display)} ô chướng ngại vật từ danh sách lân cận (hiển thị)")
+        else:
+            current_neighbors_for_display = []
+        
+        # Kiểm tra vị trí hiện tại (x,y)
+        if current_pos and is_obstacle_cell(grid, current_pos): # current_pos là (x,y)
+            st.error(f"❌ Vị trí hiện tại {current_pos} là ô chướng ngại vật và sẽ bị bỏ qua!")
+            current_pos_for_display = None # Không hiển thị current_pos nếu là chướng ngại vật
+        else:
+            current_pos_for_display = current_pos
+
+        # start_pos và end_pos từ map_data có thể là (hàng, cột) hoặc (y,x) tùy thuộc vào cách nó được tạo
+        # Giả định rằng start_pos được truyền vào hàm này là (x,y) để nhất quán
+        # Tương tự cho end_pos từ map_data
+        
+        # Kiểm tra các thành phần khác (giả sử start_pos và end_pos là (x,y))
+        if start_pos and is_obstacle_cell(grid, start_pos): 
+            st.error(f"❌ Vị trí bắt đầu {start_pos} là ô chướng ngại vật!")
+        
+        end_pos_xy = None
+        if hasattr(map_data, 'end_pos') and map_data.end_pos:
+            # Giả định map_data.end_pos là (x,y)
+            end_pos_xy = map_data.end_pos 
+            if is_obstacle_cell(grid, end_pos_xy):
+                st.error(f"❌ Vị trí kết thúc {end_pos_xy} là ô chướng ngại vật!")
         
         st.write("### 🗺️ Bản đồ")
         
-        # CSS cho bản đồ và animation
+        # CSS cho bản đồ và animation (chỉnh màu hiệu ứng lỗi)
         st.markdown("""
         <style>
         .map-container {
@@ -308,6 +481,17 @@ def draw_map(map_data, start_pos=None, visited=None, current_neighbors=None, cur
             border: 2px solid #4CAF50;
             z-index: 2;
         }
+        .obstacle-in-path-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: rgba(255, 0, 0, 0.7) !important;
+            border: 3px solid #FF0000;
+            z-index: 10 !important;
+            animation: errorBlink 1s infinite;
+        }
         @keyframes fadeIn {
             from { opacity: 0; }
             to { opacity: 1; }
@@ -322,6 +506,11 @@ def draw_map(map_data, start_pos=None, visited=None, current_neighbors=None, cur
             50% { background-color: rgba(255, 69, 0, 0.8); }
             100% { background-color: rgba(255, 69, 0, 0.5); }
         }
+        @keyframes errorBlink {
+            0% { background-color: rgba(255, 0, 0, 0.7); }
+            50% { background-color: rgba(255, 0, 0, 1); }
+            100% { background-color: rgba(255, 0, 0, 0.7); }
+        }
         .cell-content {
             position: relative;
             z-index: 4;
@@ -330,57 +519,84 @@ def draw_map(map_data, start_pos=None, visited=None, current_neighbors=None, cur
         """, unsafe_allow_html=True)
         
         # Tạo bảng dữ liệu để hiển thị bản đồ
+        # Vòng lặp i: hàng (y), j: cột (x)
         map_table = []
-        for i in range(size):
+        for i_row in range(size): # i_row là y
             row = []
-            for j in range(size):
-                cell_type = grid[i][j]
+            for j_col in range(size): # j_col là x
+                current_cell_xy = (j_col, i_row) # Tọa độ (x,y) của ô đang xét
+                cell_type = grid[i_row, j_col] # Truy cập grid bằng (hàng, cột) tức (y,x)
                 
                 # Xác định emoji và background color cho ô
-                if current_pos and (i, j) == current_pos:
+                # So sánh current_pos_for_display (x,y) với current_cell_xy (x,y)
+                if current_pos_for_display and current_cell_xy == current_pos_for_display:
                     cell_content = "🚚"
                     bg_color = "#e3f2fd"
-                elif start_pos and (i, j) == start_pos and not current_pos and not visited:  # Chỉ hiển thị xe ở vị trí bắt đầu khi chưa bắt đầu trực quan
+                # So sánh start_pos (x,y) với current_cell_xy (x,y)
+                elif start_pos and current_cell_xy == start_pos and not current_pos_for_display and not visited_for_display:
                     cell_content = "🚚"
                     bg_color = "#e3f2fd"
-                elif end_pos and (i, j) == end_pos:
+                # So sánh end_pos_xy (x,y) với current_cell_xy (x,y)
+                elif end_pos_xy and current_cell_xy == end_pos_xy:
                     cell_content = "🏁"
                     bg_color = "#fff9c4"
-                elif cell_type == 1:
+                elif cell_type == TOLL_VALUE:
                     cell_content = "🚧"
                     bg_color = "#ffebee"
-                elif cell_type == 2:
+                elif cell_type == GAS_STATION_VALUE:
                     cell_content = "⛽"
                     bg_color = "#e8f5e9"
-                elif cell_type == 3:
+                elif cell_type == OBSTACLE_VALUE:
                     cell_content = "🧱"
                     bg_color = "#efebe9"
-                else:
+                else: # ROAD_CELL
                     cell_content = "⬜"
                     bg_color = "#ffffff"
                 
                 # Thêm overlay cho các hiệu ứng
                 overlays = ""
-                if visited and (i, j) in visited:
+                # visited_for_display chứa (x,y)
+                if visited_for_display and current_cell_xy in visited_for_display:
                     overlays += '<div class="visited-overlay"></div>'
-                if current_neighbors and (i, j) in current_neighbors:
+                # current_neighbors_for_display chứa (x,y)
+                if current_neighbors_for_display and current_cell_xy in current_neighbors_for_display:
                     overlays += '<div class="neighbor-overlay"></div>'
-                if current_pos and (i, j) == current_pos:
+                # current_pos_for_display là (x,y)
+                if current_pos_for_display and current_cell_xy == current_pos_for_display:
                     overlays += '<div class="current-overlay"></div>'
-                if path and (i, j) in path:
-                    overlays += '<div class="path-overlay"></div>'
-                    if not current_pos or (i, j) != current_pos:  # Không hiển thị mũi tên nếu là vị trí hiện tại
-                        if (i, j) != path[-1]:  # Không hiển thị mũi tên ở điểm cuối
-                            next_pos = path[path.index((i, j)) + 1]
-                            # Xác định hướng mũi tên
-                            if next_pos[0] < i:
-                                cell_content = "⬆️"  # Lên
-                            elif next_pos[0] > i:
-                                cell_content = "⬇️"  # Xuống
-                            elif next_pos[1] < j:
-                                cell_content = "⬅️"  # Trái
-                            else:
-                                cell_content = "➡️"  # Phải
+                
+                # Xử lý đường đi (path chứa (x,y))
+                if path and current_cell_xy in path:
+                    # Kiểm tra xem ô này có phải là chướng ngại vật không
+                    # is_obstacle_cell nhận (grid, (x,y))
+                    if is_obstacle_cell(grid, current_cell_xy):
+                        overlays += '<div class="obstacle-in-path-overlay"></div>'
+                        cell_content = "❌"  # Đánh dấu lỗi
+                    else:
+                        overlays += '<div class="path-overlay"></div>'
+                        # Không hiển thị mũi tên nếu là vị trí hiện tại của xe
+                        if not current_pos_for_display or current_cell_xy != current_pos_for_display:
+                            # Không hiển thị mũi tên ở điểm cuối của đường đi
+                            if current_cell_xy != path[-1]: 
+                                try:
+                                    idx = path.index(current_cell_xy)
+                                    if idx + 1 < len(path):
+                                        next_pos_xy = path[idx + 1] # next_pos_xy là (x,y)
+                                        # Xác định hướng mũi tên từ current_cell_xy (x,y) đến next_pos_xy (x,y)
+                                        delta_x = next_pos_xy[0] - current_cell_xy[0]
+                                        delta_y = next_pos_xy[1] - current_cell_xy[1]
+
+                                        if delta_y < 0: # Đi lên (giảm y)
+                                            cell_content = "⬆️"
+                                        elif delta_y > 0: # Đi xuống (tăng y)
+                                            cell_content = "⬇️"
+                                        elif delta_x < 0: # Đi trái (giảm x)
+                                            cell_content = "⬅️"
+                                        elif delta_x > 0: # Đi phải (tăng x)
+                                            cell_content = "➡️"
+                                except ValueError:
+                                    # current_cell_xy có thể không nằm trong path nếu path bị lọc
+                                    pass 
                 
                 # Tạo cell với background color và overlay
                 cell = f'<div style="background-color: {bg_color};">{overlays}<div class="cell-content">{cell_content}</div></div>'
@@ -401,7 +617,8 @@ def draw_map(map_data, start_pos=None, visited=None, current_neighbors=None, cur
         
     except Exception as e:
         st.error(f"Lỗi khi hiển thị bản đồ: {str(e)}")
-        _draw_map_simple(map_data, start_pos)
+        # Cung cấp map_data, và start_pos (nếu có, giả sử là (x,y)) cho hàm fallback
+        _draw_map_simple(map_data, start_pos if start_pos else None)
 
 def draw_route(map_data, route):
     """
@@ -411,14 +628,25 @@ def draw_route(map_data, route):
     - map_data: Đối tượng Map chứa thông tin bản đồ
     - route: Danh sách các vị trí [(row1, col1), (row2, col2), ...] thể hiện tuyến đường
     """
-    if not route or len(route) < 2:
-        st.warning("⚠️ Chưa có tuyến đường để hiển thị!")
-        draw_map(map_data, route[0] if route else None)
-        return
-    
     try:
-        grid = map_data.grid
-        size = grid.shape[0]
+        # Lấy grid từ map_data
+        grid = get_grid_from_map_data(map_data)
+        
+        # Kiểm tra xem đường đi có chứa ô chướng ngại vật không
+        if route:
+            obstacle_positions = []
+            for pos in route:
+                if is_obstacle_cell(grid, pos):
+                    obstacle_positions.append(pos)
+            
+            if obstacle_positions:
+                st.error(f"⚠️ LỖI NGHIÊM TRỌNG: Đường đi chứa {len(obstacle_positions)} ô chướng ngại vật tại vị trí: {obstacle_positions[:5]}{'...' if len(obstacle_positions) > 5 else ''}")
+                st.warning("Đường đi không hợp lệ! Vui lòng kiểm tra lại thuật toán tìm đường.")
+        
+        if not route or len(route) < 2:
+            st.warning("⚠️ Không có đủ điểm để hiển thị tuyến đường!")
+            draw_map(map_data, route[0] if route and len(route) > 0 else None)
+            return
         
         st.write("### 🗺️ Bản đồ với Tuyến Đường")
         
@@ -431,8 +659,12 @@ def draw_route(map_data, route):
             'road': '🛣️',
             'route': '📍', # Emoji cho các bước trên tuyến đường
             'start': '🚩', # Emoji cho điểm bắt đầu
-            'end': '🏁'    # Emoji cho điểm kết thúc
+            'end': '🏁',   # Emoji cho điểm kết thúc
+            'error': '❌'   # Emoji cho ô lỗi (đi qua chướng ngại vật)
         }
+        
+        # Lấy kích thước của grid
+        size = grid.shape[0] if hasattr(grid, 'shape') else len(grid)
         
         # Tạo DataFrame để hiển thị bản đồ với tuyến đường
         map_data_display = []
@@ -441,42 +673,38 @@ def draw_route(map_data, route):
             for j in range(size):
                 cell_type = grid[i][j]
                 route_marker = ""
+                is_obstacle = is_obstacle_cell(grid, (i, j))
                 
                 # Xác định vị trí trong tuyến đường
-                if (i, j) == route[0]:
-                    # Điểm bắt đầu
-                    emoji = emojis['truck']
-                    route_marker = "1"
-                elif (i, j) == route[-1]:
-                    # Điểm kết thúc
-                    if cell_type == 1:
-                        emoji = emojis['toll']
-                    elif cell_type == 2:
-                        emoji = emojis['gas']
-                    elif cell_type == 3:
-                        emoji = emojis['brick']
+                if (i, j) in route:
+                    pos_index = route.index((i, j))
+                    if pos_index == 0:
+                        # Điểm bắt đầu
+                        emoji = emojis['truck']
+                        route_marker = "1"
+                    elif pos_index == len(route) - 1:
+                        # Điểm kết thúc
+                        emoji = emojis['end']
+                        route_marker = str(len(route))
                     else:
-                        emoji = emojis['road']
-                    route_marker = str(len(route))
-                elif (i, j) in route:
-                    # Điểm trên tuyến đường
-                    if cell_type == 1:
-                        emoji = emojis['toll']
-                    elif cell_type == 2:
-                        emoji = emojis['gas']
-                    elif cell_type == 3:
-                        emoji = emojis['brick']
-                    else:
-                        emoji = emojis['road']
-                    route_marker = str(route.index((i, j)) + 1)
+                        # Điểm trên tuyến đường
+                        if is_obstacle:
+                            emoji = emojis['error']  # Đánh dấu lỗi
+                        elif cell_type == 1:
+                            emoji = emojis['toll']
+                        elif cell_type == 2:
+                            emoji = emojis['gas']
+                        else:
+                            emoji = emojis['road']
+                        route_marker = str(pos_index + 1)
                 else:
-                    # Điểm không nằm trên tuyến đường
-                    if cell_type == 1:
+                    # Vị trí không nằm trên tuyến đường
+                    if is_obstacle:
+                        emoji = emojis['brick']
+                    elif cell_type == 1:
                         emoji = emojis['toll']
                     elif cell_type == 2:
                         emoji = emojis['gas']
-                    elif cell_type == 3:
-                        emoji = emojis['brick']
                     else:
                         emoji = emojis['road']
                 
@@ -487,7 +715,10 @@ def draw_route(map_data, route):
                     elif (i, j) == route[-1]:
                         cell_display = f"{emoji} {emojis['end']}{route_marker}"
                     else:
-                        cell_display = f"{emoji} {emojis['route']}{route_marker}"
+                        if is_obstacle:
+                            cell_display = f"{emoji} {emojis['error']}{route_marker}"
+                        else:
+                            cell_display = f"{emoji} {emojis['route']}{route_marker}"
                 else:
                     cell_display = emoji
                 
@@ -499,16 +730,25 @@ def draw_route(map_data, route):
         
         # Hiển thị thông tin tuyến đường
         st.info("📍 Thông tin tuyến đường")
-        total_toll = sum(1 for pos in route if grid[pos[0]][pos[1]] == 1)
-        total_gas = sum(1 for pos in route if grid[pos[0]][pos[1]] == 2)
+        total_toll = sum(1 for pos in route if grid[pos[1]][pos[0]] == 1)
+        total_gas = sum(1 for pos in route if grid[pos[1]][pos[0]] == 2)
+        total_obstacles = sum(1 for pos in route if is_obstacle_cell(grid, pos))
         
-        route_info_cols = st.columns(3)
+        route_info_cols = st.columns(4)
         with route_info_cols[0]:
             st.metric("Độ dài tuyến đường", f"{len(route) - 1} bước")
         with route_info_cols[1]:
             st.metric("Trạm thu phí", total_toll)
         with route_info_cols[2]:
             st.metric("Trạm xăng", total_gas)
+        with route_info_cols[3]:
+            if total_obstacles > 0:
+                st.metric("Ô chướng ngại vật", total_obstacles, delta=-total_obstacles, delta_color="inverse")
+            else:
+                st.metric("Ô chướng ngại vật", 0)
+        
+        if total_obstacles > 0:
+            st.error("⚠️ Đường đi qua chướng ngại vật không hợp lệ!")
         
     except Exception as e:
         st.error(f"Lỗi khi hiển thị tuyến đường: {str(e)}")
@@ -582,18 +822,14 @@ def draw_animation(map_data, states):
                         emoji = emojis['toll']
                     elif cell_type == 2:
                         emoji = emojis['gas']
-                    elif cell_type == 3:
+                    elif cell_type == -1:
                         emoji = emojis['brick']
                     else:
                         emoji = emojis['road']
                     position_marker = "past"
                 else:
                     # Vị trí bình thường
-                    if cell_type == 1:
-                        emoji = emojis['toll']
-                    elif cell_type == 2:
-                        emoji = emojis['gas']
-                    elif cell_type == 3:
+                    if cell_type == -1:
                         emoji = emojis['brick']
                     else:
                         emoji = emojis['road']

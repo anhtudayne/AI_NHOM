@@ -192,7 +192,7 @@ class Map:
                         if dist_from_center <= cluster_size and grid[i][j] == 0:
                             # Xác suất đặt vật cản giảm theo khoảng cách từ tâm
                             if np.random.random() > dist_from_center / (2 * cluster_size):
-                                grid[i][j] = 3  # Đặt vật cản
+                                grid[i][j] = -1  # Đặt vật cản
                                 bricks_in_this_cluster += 1
                                 
                                 if bricks_in_this_cluster >= bricks_per_cluster:
@@ -218,7 +218,7 @@ class Map:
                             break
                     
                     if not too_close and grid[row][col] == 0:
-                        grid[row][col] = 3  # Đặt vật cản
+                        grid[row][col] = -1  # Đặt vật cản
                         num_random_bricks -= 1
                         
                         if num_random_bricks <= 0:
@@ -309,7 +309,7 @@ class Map:
         for i in range(size):
             for j in range(size):
                 # Đặt tất cả các ô là vật cản trước
-                map_obj.grid[i][j] = 3
+                map_obj.grid[i][j] = -1
         
         # Tạo đường thẳng ngang và dọc
         mid = size // 2
@@ -363,7 +363,7 @@ class Map:
             start_i = random.randint(2, size-3)
             start_j = random.randint(2, size-3)
             
-            if map_obj.grid[start_i][start_j] == 3:  # Nếu là vật cản
+            if map_obj.grid[start_i][start_j] == -1:  # Nếu là vật cản
                 # Tạo đường đi ngẫu nhiên
                 for length in range(random.randint(3, 6)):
                     directions = [(0, 1), (1, 0), (0, -1), (-1, 0)]  # Phải, xuống, trái, lên
@@ -403,7 +403,7 @@ class Map:
             'normal_roads': np.sum(self.grid == 0),
             'toll_stations': np.sum(self.grid == 1),
             'gas_stations': np.sum(self.grid == 2),
-            'brick_cells': np.sum(self.grid == 3)
+            'brick_cells': np.sum(self.grid == -1)
         }
     
     def save(self, filename=None):

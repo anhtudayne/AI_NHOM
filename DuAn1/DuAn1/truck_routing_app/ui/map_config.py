@@ -327,12 +327,12 @@ def render_map_config():
                     st.write("Chọn loại ô cần vẽ:")
                     cell_type = st.radio(
                         "",
-                        options=[0, 1, 2, 3],
+                        options=[0, 1, 2, -1],
                         format_func=lambda x: {
                             0: "🛣️ Đường thông thường",
                             1: "🚧 Trạm thu phí",
                             2: "⛽ Trạm xăng",
-                            3: "🧱 Vật cản"
+                            -1: "🧱 Vật cản"
                         }[x],
                         horizontal=True
                     )
@@ -347,10 +347,10 @@ def render_map_config():
                         hide_index=False,
                         column_config={i: st.column_config.SelectboxColumn(
                             f"Cột {i}",
-                            options=[0, 1, 2, 3],
+                            options=[0, 1, 2, -1],
                             required=True,
                             width="small",
-                            help="0: Đường, 1: Thu phí, 2: Xăng, 3: Vật cản"
+                            help="0: Đường, 1: Thu phí, 2: Xăng, -1: Vật cản"
                         ) for i in range(st.session_state.map.size)}
                     )
                     
