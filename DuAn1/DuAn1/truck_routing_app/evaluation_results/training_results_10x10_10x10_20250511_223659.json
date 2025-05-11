@@ -1,0 +1,52 @@
+{
+  "map_size": 10,
+  "num_maps": 10,
+  "training_steps": 250000,
+  "use_advanced": true,
+  "model_path": "saved_models\\rl_agent_size_10_advanced_10x10_20250511_223659.zip",
+  "training_id": "10x10_20250511_223659",
+  "training_time": 989.1692373752594,
+  "evaluation_results": {
+    "success_rate": 0.0,
+    "avg_reward": -233.8,
+    "avg_steps": 201.66666666666666,
+    "avg_remaining_fuel": 0.0,
+    "avg_remaining_money": 0.0,
+    "map_size": 10,
+    "num_maps": 3,
+    "num_episodes": 5,
+    "map_results": [
+      {
+        "map_name": "map_10x10_1_20250511_212841.json",
+        "success_rate": 0.0,
+        "avg_reward": -296.4,
+        "avg_steps": 300.0,
+        "avg_remaining_fuel": 0.0,
+        "avg_remaining_money": 0.0
+      },
+      {
+        "map_name": "map_10x10_2_20250511_212841.json",
+        "success_rate": 0.0,
+        "avg_reward": -300.0,
+        "avg_steps": 300.0,
+        "avg_remaining_fuel": 0.0,
+        "avg_remaining_money": 0.0
+      },
+      {
+        "map_name": "map_10x10_3_20250511_212841.json",
+        "success_rate": 0.0,
+        "avg_reward": -105.0,
+        "avg_steps": 5.0,
+        "avg_remaining_fuel": 0.0,
+        "avg_remaining_money": 0.0
+      }
+    ]
+  },
+  "detailed_results": {
+    "success_rate": null,
+    "avg_reward": null,
+    "avg_path_length": null,
+    "avg_fuel_consumed": null,
+    "avg_money_spent": null
+  }
+}

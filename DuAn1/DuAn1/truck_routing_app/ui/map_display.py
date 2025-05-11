@@ -345,6 +345,19 @@ def draw_map(map_data, start_pos=None, visited=None, current_neighbors=None, cur
         grid = get_grid_from_map_data(map_data)
         size = grid.shape[0] # Giả sử là bản đồ vuông
         
+        # Lấy vị trí bắt đầu từ map_data nếu không có trong tham số
+        if start_pos is None and hasattr(map_data, 'start_pos'):
+            start_pos = map_data.start_pos
+            if start_pos is not None:
+                print(f"INFO: Sử dụng start_pos từ map_data: {start_pos}")
+        
+        # Ghi log các thông tin debug giúp theo dõi vấn đề start_pos
+        if start_pos is None:
+            print("INFO: start_pos chưa được thiết lập")
+            print(f"DEBUG: start_pos = {start_pos}, kiểu: {type(start_pos)}")
+            if hasattr(map_data, 'start_pos'):
+                print(f"DEBUG: map_data.start_pos = {map_data.start_pos}, kiểu: {type(map_data.start_pos)}")
+            
         # KIỂM TRA KHẨN CẤP: Đảm bảo đường đi không chứa chướng ngại vật
         if path:
             obstacles_in_path = []
@@ -410,27 +423,46 @@ def draw_map(map_data, start_pos=None, visited=None, current_neighbors=None, cur
         # CSS cho bản đồ và animation (chỉnh màu hiệu ứng lỗi)
         st.markdown("""
         <style>
+        /* Reset styles để loại bỏ background từ mọi phần tử */
+        .map-container, .map-container *, .map-container *:before, .map-container *:after {
+            background: transparent !important;
+            background-color: transparent !important;
+            box-shadow: none !important;
+            border: none !important;
+        }
+        
         .map-container {
             display: flex;
             justify-content: center;
             margin: 20px 0;
-            padding: 20px;
-            background: white;
-            border-radius: 10px;
-            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            padding: 25px;
+            border-radius: 20px;
+            transition: all 0.5s ease;
         }
+        
         .map-container table {
             border-collapse: collapse;
+            border-radius: 15px;
+            overflow: hidden;
+            transform: perspective(1200px) rotateX(2deg);
+            transition: all 0.5s ease;
         }
+        
+        .map-container:hover table {
+            transform: perspective(1200px) rotateX(0deg);
+        }
+        
         .map-container td {
-            width: 60px;
-            height: 60px;
+            width: 64px;
+            height: 64px;
             text-align: center;
-            font-size: 24px;
             padding: 0;
             position: relative;
+            border: none;
             transition: all 0.3s ease;
+            overflow: hidden;
         }
+        
         .map-container td > div {
             width: 100%;
             height: 100%;
@@ -440,83 +472,147 @@ def draw_map(map_data, start_pos=None, visited=None, current_neighbors=None, cur
             position: relative;
             transition: all 0.3s ease;
         }
+        
         .visited-overlay {
             position: absolute;
             top: 0;
             left: 0;
             right: 0;
             bottom: 0;
-            background-color: rgba(100, 181, 246, 0.6) !important;
+            background-color: rgba(100, 181, 246, 0.05) !important;
             z-index: 1;
-            animation: fadeIn 0.5s ease;
+            animation: fadeIn 0.7s ease;
         }
+        
         .neighbor-overlay {
             position: absolute;
             top: 0;
             left: 0;
             right: 0;
             bottom: 0;
-            background-color: rgba(255, 215, 0, 0.3);
-            border: 2px dashed #ffd700;
+            background-color: rgba(255, 215, 0, 0.05) !important;
             z-index: 2;
-            animation: pulse 1s infinite;
+            animation: pulseGlow 1.5s infinite;
         }
+        
         .current-overlay {
             position: absolute;
             top: 0;
             left: 0;
             right: 0;
             bottom: 0;
-            background-color: rgba(255, 69, 0, 0.5);
+            background-color: rgba(255, 69, 0, 0.08) !important;
             z-index: 3;
-            animation: highlight 1s infinite;
+            animation: highlightPulse 1.2s infinite;
         }
+        
         .path-overlay {
             position: absolute;
             top: 0;
             left: 0;
             right: 0;
             bottom: 0;
-            background-color: rgba(76, 175, 80, 0.5);
-            border: 2px solid #4CAF50;
+            background: rgba(76, 175, 80, 0.05) !important;
             z-index: 2;
+            animation: pathGlow 3s infinite;
         }
+        
         .obstacle-in-path-overlay {
             position: absolute;
             top: 0;
             left: 0;
             right: 0;
             bottom: 0;
-            background-color: rgba(255, 0, 0, 0.7) !important;
-            border: 3px solid #FF0000;
+            background-color: rgba(220, 53, 69, 0.2) !important;
             z-index: 10 !important;
-            animation: errorBlink 1s infinite;
+            animation: errorBlink 0.8s infinite;
         }
+        
         @keyframes fadeIn {
-            from { opacity: 0; }
-            to { opacity: 1; }
+            from { opacity: 0; transform: scale(0.95); }
+            to { opacity: 1; transform: scale(1); }
         }
-        @keyframes pulse {
-            0% { transform: scale(1); opacity: 0.8; }
-            50% { transform: scale(1.05); opacity: 0.5; }
-            100% { transform: scale(1); opacity: 0.8; }
+        
+        @keyframes pulseGlow {
+            0% { opacity: 0.4; }
+            50% { opacity: 0.2; }
+            100% { opacity: 0.4; }
         }
-        @keyframes highlight {
-            0% { background-color: rgba(255, 69, 0, 0.5); }
-            50% { background-color: rgba(255, 69, 0, 0.8); }
-            100% { background-color: rgba(255, 69, 0, 0.5); }
+        
+        @keyframes highlightPulse {
+            0% { background-color: rgba(255, 69, 0, 0.08) !important; }
+            50% { background-color: rgba(255, 69, 0, 0.15) !important; }
+            100% { background-color: rgba(255, 69, 0, 0.08) !important; }
         }
+        
+        @keyframes pathGlow {
+            0% { opacity: 0.4; }
+            50% { opacity: 0.7; }
+            100% { opacity: 0.4; }
+        }
+        
         @keyframes errorBlink {
-            0% { background-color: rgba(255, 0, 0, 0.7); }
-            50% { background-color: rgba(255, 0, 0, 1); }
-            100% { background-color: rgba(255, 0, 0, 0.7); }
+            0% { background-color: rgba(220, 53, 69, 0.2) !important; }
+            50% { background-color: rgba(220, 53, 69, 0.35) !important; }
+            100% { background-color: rgba(220, 53, 69, 0.2) !important; }
         }
+        
         .cell-content {
             position: relative;
             z-index: 4;
+            font-size: 32px;
+            line-height: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 100%;
+            height: 100%;
+            transition: all 0.3s ease;
+        }
+        
+        .cell-content:hover {
+            transform: scale(1.1);
+        }
+        
+        /* Hiệu ứng khi di chuột qua bản đồ */
+        .map-container tr {
+            transition: all 0.3s ease;
+        }
+        
+        .map-container tr:hover {
+            transform: translateY(-2px);
+        }
+        
+        /* Xóa các đường kẻ giữa các ô */
+        .map-container td::after {
+            display: none;
+        }
+        
+        .current-pos-cell .cell-content {
+            animation: pulseTruck 1.2s infinite ease-in-out;
+            transform-origin: center;
+            z-index: 5;
+        }
+        
+        @keyframes pulseTruck {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.15); }
+            100% { transform: scale(1); }
+        }
+        
+        /* Xe tải luôn hiển thị rõ ràng */
+        .truck-icon {
+            font-size: 40px !important;
+            filter: drop-shadow(0 2px 5px rgba(0,0,0,0.1));
+            color: #FF5722;
         }
         </style>
         """, unsafe_allow_html=True)
+        
+        # Debug để kiểm tra start_pos có đúng format không
+        print(f"DEBUG: start_pos = {start_pos}, kiểu: {type(start_pos) if start_pos else None}")
+        if hasattr(map_data, 'start_pos'):
+            print(f"DEBUG: map_data.start_pos = {map_data.start_pos}, kiểu: {type(map_data.start_pos)}")
         
         # Tạo bảng dữ liệu để hiển thị bản đồ
         # Vòng lặp i: hàng (y), j: cột (x)
@@ -527,31 +623,43 @@ def draw_map(map_data, start_pos=None, visited=None, current_neighbors=None, cur
                 current_cell_xy = (j_col, i_row) # Tọa độ (x,y) của ô đang xét
                 cell_type = grid[i_row, j_col] # Truy cập grid bằng (hàng, cột) tức (y,x)
                 
-                # Xác định emoji và background color cho ô
-                # So sánh current_pos_for_display (x,y) với current_cell_xy (x,y)
-                if current_pos_for_display and current_cell_xy == current_pos_for_display:
-                    cell_content = "🚚"
-                    bg_color = "#e3f2fd"
-                # So sánh start_pos (x,y) với current_cell_xy (x,y)
-                elif start_pos and current_cell_xy == start_pos and not current_pos_for_display and not visited_for_display:
-                    cell_content = "🚚"
-                    bg_color = "#e3f2fd"
-                # So sánh end_pos_xy (x,y) với current_cell_xy (x,y)
-                elif end_pos_xy and current_cell_xy == end_pos_xy:
-                    cell_content = "🏁"
-                    bg_color = "#fff9c4"
-                elif cell_type == TOLL_VALUE:
+                # Xác định loại ô và class CSS tương ứng
+                cell_type_class = "cell-type-road"  # Mặc định là đường
+                if cell_type == TOLL_VALUE:
                     cell_content = "🚧"
-                    bg_color = "#ffebee"
+                    cell_type_class = "cell-type-toll"
                 elif cell_type == GAS_STATION_VALUE:
                     cell_content = "⛽"
-                    bg_color = "#e8f5e9"
+                    cell_type_class = "cell-type-gas"
                 elif cell_type == OBSTACLE_VALUE:
                     cell_content = "🧱"
-                    bg_color = "#efebe9"
+                    cell_type_class = "cell-type-obstacle"
                 else: # ROAD_CELL
-                    cell_content = "⬜"
-                    bg_color = "#ffffff"
+                    cell_content = ""  # Sử dụng chuỗi rỗng thay vì emoji vuông trắng
+                    cell_type_class = "cell-type-road"
+                
+                # Kiểm tra nếu là vị trí bắt đầu hoặc kết thúc
+                if end_pos_xy and current_cell_xy == end_pos_xy:
+                    cell_content = "🏁"
+                    cell_type_class = "cell-type-end"
+                
+                # *** THAY ĐỔI QUAN TRỌNG: Luôn ưu tiên hiển thị xe tải ở vị trí bắt đầu ***
+                # Debug để kiểm tra có match không
+                if start_pos and current_cell_xy == start_pos:
+                    print(f"DEBUG: Đã tìm thấy vị trí bắt đầu tại {current_cell_xy}")
+                    cell_content = """<span class='truck-icon' style='
+                                     font-size: 40px !important; 
+                                     filter: drop-shadow(0 2px 5px rgba(0,0,0,0.1)); 
+                                     color: #FF5722;'>🚚</span>"""
+                    cell_type_class = "cell-type-start current-pos-cell"
+                
+                # Vị trí hiện tại của xe tải (nếu khác vị trí bắt đầu)
+                current_pos_class = ""
+                if current_pos_for_display and current_cell_xy == current_pos_for_display:
+                    # Chỉ hiển thị xe tải ở vị trí hiện tại nếu khác với vị trí bắt đầu
+                    if not start_pos or current_cell_xy != start_pos:
+                        cell_content = "<span class='truck-icon'>🚚</span>"
+                        current_pos_class = "current-pos-cell"
                 
                 # Thêm overlay cho các hiệu ứng
                 overlays = ""
@@ -574,8 +682,8 @@ def draw_map(map_data, start_pos=None, visited=None, current_neighbors=None, cur
                         cell_content = "❌"  # Đánh dấu lỗi
                     else:
                         overlays += '<div class="path-overlay"></div>'
-                        # Không hiển thị mũi tên nếu là vị trí hiện tại của xe
-                        if not current_pos_for_display or current_cell_xy != current_pos_for_display:
+                        # Không hiển thị mũi tên nếu là vị trí hiện tại của xe hoặc vị trí bắt đầu
+                        if (not current_pos_for_display or current_cell_xy != current_pos_for_display) and (not start_pos or current_cell_xy != start_pos):
                             # Không hiển thị mũi tên ở điểm cuối của đường đi
                             if current_cell_xy != path[-1]: 
                                 try:
@@ -598,17 +706,23 @@ def draw_map(map_data, start_pos=None, visited=None, current_neighbors=None, cur
                                     # current_cell_xy có thể không nằm trong path nếu path bị lọc
                                     pass 
                 
-                # Tạo cell với background color và overlay
-                cell = f'<div style="background-color: {bg_color};">{overlays}<div class="cell-content">{cell_content}</div></div>'
+                # Tạo cell với class và overlay, thêm inline style để đảm bảo trong suốt
+                cell = f'<td class="{cell_type_class} {current_pos_class}" style="background: transparent !important;"><div style="background: transparent !important;">{overlays}<div class="cell-content" style="background: transparent !important;">{cell_content}</div></div></td>'
                 row.append(cell)
             map_table.append(row)
+        
+        # Hiển thị thông tin debug
+        if start_pos:
+            print(f"Vị trí xe tải (start_pos): {start_pos}")
+        if current_pos:
+            print(f"Vị trí hiện tại (current_pos): {current_pos}")
         
         # Hiển thị bản đồ dạng bảng với HTML
         st.markdown(
             f"""
-            <div class="map-container">
-                <table>
-                    {''.join(f"<tr>{''.join(f'<td>{cell}</td>' for cell in row)}</tr>" for row in map_table)}
+            <div class="map-container" style="background: transparent !important;">
+                <table style="background: transparent !important;">
+                    {''.join(f"<tr style='background: transparent !important;'>{''.join(cell for cell in row)}</tr>" for row in map_table)}
                 </table>
             </div>
             """,
@@ -617,6 +731,9 @@ def draw_map(map_data, start_pos=None, visited=None, current_neighbors=None, cur
         
     except Exception as e:
         st.error(f"Lỗi khi hiển thị bản đồ: {str(e)}")
+        # Hiển thị traceback đầy đủ cho debug
+        import traceback
+        st.error(traceback.format_exc())
         # Cung cấp map_data, và start_pos (nếu có, giả sử là (x,y)) cho hàm fallback
         _draw_map_simple(map_data, start_pos if start_pos else None)
 
@@ -766,10 +883,25 @@ def draw_animation(map_data, states):
     if not states or len(states) < 2:
         st.warning("⚠️ Không đủ trạng thái để tạo animation!")
         if states and len(states) > 0:
-            draw_map(map_data, states[0][0])  # Chỉ hiển thị vị trí đầu tiên
+            # Ưu tiên sử dụng start_pos từ map_data nếu có
+            start_pos = None
+            if hasattr(map_data, 'start_pos'):
+                start_pos = map_data.start_pos
+            draw_map(map_data, start_pos if start_pos else states[0][0])  # Hiển thị vị trí bắt đầu hoặc vị trí đầu tiên
+        else:
+            # Nếu không có states, vẫn cố gắng hiển thị bản đồ với vị trí bắt đầu
+            start_pos = None
+            if hasattr(map_data, 'start_pos'):
+                start_pos = map_data.start_pos
+            draw_map(map_data, start_pos)
         return
     
     try:
+        # Lấy vị trí bắt đầu từ map_data nếu có
+        start_pos = None
+        if hasattr(map_data, 'start_pos'):
+            start_pos = map_data.start_pos
+        
         # Lấy danh sách các vị trí từ states
         positions = [state[0] for state in states]
         fuels = [state[1] for state in states]
@@ -803,50 +935,107 @@ def draw_animation(map_data, states):
             'current': '📌' # Emoji cho vị trí hiện tại
         }
         
-        # Tạo DataFrame để hiển thị bản đồ với tuyến đường và vị trí hiện tại
-        map_data_display = []
-        for i in range(size):
-            row = []
-            for j in range(size):
-                cell_type = grid[i][j]
-                position_marker = ""
-                
-                # Xác định vị trí hiện tại và đã đi qua
-                if (i, j) == current_pos:
-                    # Vị trí hiện tại
-                    emoji = emojis['truck']
-                    position_marker = "current"
-                elif (i, j) in positions[:step]:
-                    # Vị trí đã đi qua
-                    if cell_type == 1:
-                        emoji = emojis['toll']
-                    elif cell_type == 2:
-                        emoji = emojis['gas']
-                    elif cell_type == -1:
-                        emoji = emojis['brick']
-                    else:
-                        emoji = emojis['road']
-                    position_marker = "past"
-                else:
-                    # Vị trí bình thường
-                    if cell_type == -1:
-                        emoji = emojis['brick']
-                    else:
-                        emoji = emojis['road']
-                
-                # Thêm đánh dấu vào các ô đã đi qua và vị trí hiện tại
-                if position_marker == "current":
-                    cell_display = f"{emoji} {emojis['current']}"
-                elif position_marker == "past":
-                    cell_display = f"{emoji} {emojis['route']}"
-                else:
-                    cell_display = emoji
-                
-                row.append(cell_display)
-            map_data_display.append(row)
+        # CSS cho bản đồ animation
+        st.markdown("""
+        <style>
+        /* Reset styles for elements *inside* the map-container if necessary, but not map-container itself */
+        .map-anim-container, .map-anim-container *, .map-anim-container *:before, .map-anim-container *:after {
+            background: transparent !important;
+            background-color: transparent !important;
+            box-shadow: none !important;
+            border: none !important;
+        }
         
-        # Hiển thị bản đồ dạng bảng
-        st.table(map_data_display)
+        .map-anim-container table {
+            border-collapse: collapse;
+        }
+        
+        .anim-cell {
+            padding: 10px;
+            text-align: center;
+            font-size: 32px;
+            position: relative;
+        }
+        
+        .anim-truck {
+            font-size: 35px !important; 
+            filter: drop-shadow(0 2px 5px rgba(0,0,0,0.1));
+        }
+        
+        .anim-marker {
+            font-size: 18px;
+            color: #1E88E5;
+        }
+        
+        .anim-current {
+            color: #FF5722;
+        }
+        
+        .anim-path {
+            color: #4CAF50;
+        }
+        </style>
+        """, unsafe_allow_html=True)
+        
+        # Tạo DataFrame để hiển thị bản đồ với tuyến đường và vị trí hiện tại
+        map_table = []
+        for i_row in range(size): # i_row là y
+            row = []
+            for j_col in range(size): # j_col là x
+                current_cell_xy = (j_col, i_row) # Tọa độ (x,y) của ô đang xét
+                cell_type = grid[i_row, j_col] # Truy cập grid bằng (hàng, cột) tức (y,x)
+                
+                # Xác định loại ô và class CSS tương ứng
+                cell_type_class = "cell-type-road" 
+                if cell_type == TOLL_VALUE:
+                    cell_content = "🚧"
+                    cell_type_class = "cell-type-toll"
+                elif cell_type == GAS_STATION_VALUE:
+                    cell_content = "⛽"
+                    cell_type_class = "cell-type-gas"
+                elif cell_type == OBSTACLE_VALUE:
+                    cell_content = "🧱"
+                    cell_type_class = "cell-type-obstacle"
+                else: # ROAD_CELL
+                    cell_content = ""  # Sử dụng chuỗi rỗng thay vì emoji vuông trắng
+                    cell_type_class = "cell-type-road"
+                
+                # IMPORTANT: Hiển thị xe tải ở vị trí bắt đầu mọi lúc
+                if start_pos and current_cell_xy == start_pos:
+                    cell_content = "<span class='anim-truck'>🚚</span>"
+                    cell_type_class = "cell-type-start"
+                    position_marker = "<span class='anim-marker'>Bắt đầu</span>"
+                # Vị trí hiện tại của xe (nếu khác vị trí bắt đầu)
+                elif current_cell_xy == current_pos and (not start_pos or current_pos != start_pos):
+                    cell_content = "<span class='anim-truck'>🚚</span>"
+                    position_marker = "<span class='anim-marker anim-current'>Hiện tại</span>"
+                # Vị trí đã đi qua (ngoại trừ vị trí bắt đầu)
+                elif current_cell_xy in positions[:step] and (not start_pos or current_cell_xy != start_pos):
+                    position_marker = "<span class='anim-marker anim-path'>Đã đi</span>"
+                else:
+                    position_marker = ""
+                
+                # Tạo cell HTML
+                cell = f"""<td class="anim-cell {cell_type_class}" style="background: transparent !important;">
+                    <div style="background: transparent !important;">
+                        {cell_content}
+                        <div>{position_marker}</div>
+                    </div>
+                </td>"""
+                row.append(cell)
+            map_table.append(row)
+        
+        # Hiển thị bản đồ dạng bảng với HTML
+        st.markdown(
+            f"""
+            <div class="map-anim-container" style="background: transparent !important;">
+                <table style="background: transparent !important;">
+                    {''.join(f"<tr style='background: transparent !important;'>{''.join(cell for cell in row)}</tr>" for row in map_table)}
+                </table>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
         
         # Hiển thị lượng nhiên liệu
         st.subheader("🚚 Trạng thái hiện tại")
@@ -861,8 +1050,6 @@ def draw_animation(map_data, states):
         # Thanh nhiên liệu
         fuel_percentage = current_fuel * 100 / 20.0  # Giả sử nhiên liệu tối đa là 10
         
-
-
         # Sử dụng progress bar của Streamlit
         fuel_color = "normal"
         if fuel_percentage <= 10:
@@ -876,6 +1063,8 @@ def draw_animation(map_data, states):
     
     except Exception as e:
         st.error(f"Lỗi khi tạo animation: {str(e)}")
-        # Hiển thị bản đồ thông thường
-        if states and len(states) > 0:
-            draw_map(map_data, states[0][0])  # Chỉ hiển thị vị trí đầu tiên
+        # Hiển thị bản đồ thông thường với vị trí bắt đầu
+        start_pos = None
+        if hasattr(map_data, 'start_pos'):
+            start_pos = map_data.start_pos
+        draw_map(map_data, start_pos if start_pos else (states[0][0] if states and len(states) > 0 else None))

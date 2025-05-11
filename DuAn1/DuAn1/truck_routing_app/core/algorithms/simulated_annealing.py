@@ -183,7 +183,7 @@ class SimulatedAnnealing(BaseSearch):
             return []
         
         # Evaluate initial path
-        is_feasible, reason, cost, fuel = self.evaluate_path(current_path)
+        is_feasible, reason, cost, fuel = self.evaluate_path_extended(current_path)
         if not is_feasible:
             print(f"Initial path not feasible: {reason}")
             return []
@@ -209,7 +209,7 @@ class SimulatedAnnealing(BaseSearch):
                 neighbor_path = self.create_neighbor_path(current_path)
                 
                 # Evaluate neighbor path
-                neighbor_feasible, neighbor_reason, neighbor_cost, neighbor_fuel = self.evaluate_path(neighbor_path)
+                neighbor_feasible, neighbor_reason, neighbor_cost, neighbor_fuel = self.evaluate_path_extended(neighbor_path)
                 
                 # If neighbor is feasible
                 if neighbor_feasible:

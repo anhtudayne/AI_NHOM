@@ -460,3 +460,6 @@ class GreedySearch(BaseSearch):
             return True
         
         return False 
+
+# Add an alias for backward compatibility with existing code
+Greedy = GreedySearch 

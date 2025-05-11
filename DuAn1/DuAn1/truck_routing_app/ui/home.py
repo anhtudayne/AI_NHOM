@@ -29,7 +29,9 @@ def render_home():
        - Vẽ bản đồ thủ công hoặc tạo ngẫu nhiên
     
     2. **Định tuyến và tối ưu:**
-       - Sử dụng các thuật toán tìm đường (BFS, DFS, A*)
+       - Sử dụng các thuật toán tìm đường truyền thống (BFS, DFS, A*)
+       - Áp dụng các thuật toán metaheuristic (Genetic Algorithm, Simulated Annealing)
+       - **Học tăng cường (RL)** cho tuyến đường thích ứng thông minh
        - Áp dụng các ràng buộc (nhiên liệu, phí cầu)
        - Tối ưu hóa tuyến đường
     
@@ -37,6 +39,21 @@ def render_home():
        - Hiển thị quá trình di chuyển
        - Phân tích hiệu suất
        - Xuất báo cáo và thống kê
+    """)
+    
+    # Thêm mục Tính năng nổi bật với RL như một điểm nhấn
+    st.header("✨ Tính năng nổi bật")
+    st.markdown("""
+    ### 🧠 Định tuyến với Học Tăng Cường (Reinforcement Learning)
+    
+    Hệ thống tích hợp các agent Học Tăng Cường (RL) tiên tiến:
+    
+    - **Thích ứng thông minh**: Agent RL có khả năng thích ứng với các loại bản đồ khác nhau mà không cần huấn luyện lại
+    - **Chiến lược tùy chỉnh**: Lựa chọn chiến lược ưu tiên (tiết kiệm chi phí, nhanh nhất, an toàn nhiên liệu)
+    - **Ra quyết định tối ưu**: Agent học cách cân bằng giữa chi phí, thời gian và tài nguyên
+    - **Khả năng đổ xăng**: Tự động quyết định khi nào cần ghé trạm xăng dựa trên tình hình thực tế
+    
+    Dùng tab "RL Nâng cao" trong ứng dụng kiểm tra RL (rl_test.py) để huấn luyện và tinh chỉnh các agent.
     """)
     
     # Phần hướng dẫn sử dụng
@@ -48,14 +65,15 @@ def render_home():
        - Tạo bản đồ theo ý muốn
     
     2. **Định tuyến:**
-       - Chọn thuật toán định tuyến
+       - Chọn thuật toán định tuyến (bao gồm Học Tăng Cường)
        - Thiết lập các tham số
        - Chạy mô phỏng
     
     3. **Phân tích:**
        - Xem kết quả định tuyến
        - Phân tích hiệu suất
-       - Xuất báo cáo
+       - So sánh các thuật toán khác nhau
+       - Xem các chỉ số RL chi tiết (khi sử dụng agent RL)
     """)
     
     # Phần thông tin liên hệ

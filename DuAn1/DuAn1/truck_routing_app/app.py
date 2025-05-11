@@ -4,19 +4,42 @@ This file serves as the entry point for the Streamlit application.
 """
 
 import streamlit as st
+import os
+
+# Giải pháp vá lỗi "Tried to instantiate class '__path__._path'" khi sử dụng Streamlit với PyTorch
+_torch_patch_warning = None
+try:
+    import torch
+    # Vá lỗi torch.classes.__path__ để tránh xung đột với file watcher của Streamlit
+    if hasattr(torch, 'classes') and hasattr(torch.classes, '__file__') and torch.classes.__file__ is not None:
+        torch.classes.__path__ = []
+    elif hasattr(torch, 'classes'): # Fallback nếu __file__ là None
+        torch.classes.__path__ = []
+    print("DEBUG: torch.classes.__path__ has been patched.")
+except ImportError:
+    print("DEBUG: PyTorch is not installed, skipping patch for torch.classes.__path__.")
+except Exception as e:
+    # Lưu lại cảnh báo để hiển thị sau, thay vì gọi st.warning() tại đây
+    _torch_patch_warning = f"DEBUG: Could not patch torch.classes.__path__: {e}"
+    print(_torch_patch_warning) # In ra console để debug
+
 from ui.home import render_home
 from ui.map_config import render_map_config
 from ui.routing_visualization import render_routing_visualization
 from ui.algorithm_evaluation import render_evaluation_page
 
 def main():
-    # Thiết lập cấu hình trang
+    # Thiết lập cấu hình trang - PHẢI LÀ LỆNH STREAMLIT ĐẦU TIÊN
     st.set_page_config(
         page_title="Hệ Thống Định Tuyến Phân Phối Hàng Hóa",
         page_icon="🚚",
         layout="wide",
         initial_sidebar_state="expanded"
     )
+
+    # Hiển thị cảnh báo vá lỗi torch nếu có
+    if _torch_patch_warning:
+        st.warning(_torch_patch_warning)
     
     # CSS chung cho toàn bộ ứng dụng
     st.markdown("""

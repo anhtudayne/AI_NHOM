@@ -18,7 +18,12 @@ from core.algorithms.greedy import GreedySearch
 from core.algorithms.local_beam import LocalBeamSearch
 from core.algorithms.simulated_annealing import SimulatedAnnealing
 from core.algorithms.genetic_algorithm import GeneticAlgorithm
+from core.rl_environment import TruckRoutingEnv  # Import RL environment
+from core.algorithms.rl_DQNAgent import DQNAgentTrainer  # Import RL agent
 from ui import map_display
+from core.and_or_search_logic.problem_definition import AndOrProblem
+from core.and_or_search_logic.search_algorithm import solve_and_or_problem, FAILURE, NO_PLAN
+import sys
 
 # Hằng số xác định loại ô (đồng bộ với base_search.py)
 OBSTACLE_CELL = -1    # Ô chướng ngại vật
@@ -164,12 +169,23 @@ def draw_truck_animation(map_data, path, speed=5):
     visited_positions = path[:current_step+1]
     current_position = path[current_step]
     
+    # Chỉ hiển thị đường đi mũi tên khi đã đến đích
+    display_path = path if current_step == total_steps else None
+    
+    # Tạo start_pos custom để xử lý ẩn icon xe tải ở vị trí bắt đầu
+    custom_start_pos = None
+    # Chỉ hiển thị xe tải ở vị trí bắt đầu khi KHÔNG đang chạy animation
+    # và chỉ ở trạng thái ban đầu (step=0) hoặc đã hoàn thành (step=total_steps)
+    if not st.session_state.get("is_playing", False) and (current_step == 0 or current_step == total_steps):
+        custom_start_pos = st.session_state.start_pos  # Sử dụng vị trí bắt đầu từ session state
+    
     # Vẽ bản đồ với vị trí xe
     map_display.draw_map(
-            map_data=map_data,
+        map_data=map_data,
+        start_pos=custom_start_pos,
         visited=visited_positions,
         current_pos=current_position,
-        path=path  # Hiển thị toàn bộ đường đi
+        path=display_path  # Chỉ hiển thị đường đi khi đến đích
     )
     
     # Nếu đang chạy animation và chưa đến cuối đường
@@ -326,6 +342,152 @@ def run_algorithm(algorithm_name: str, map_data: np.ndarray, start: Tuple[int, i
     toll_base_cost = st.session_state.get('toll_base_cost', 150.0)
     initial_fuel = st.session_state.get('initial_fuel', max_fuel)
     
+    # Xử lý riêng cho thuật toán RL
+    if algorithm_name == "Học Tăng Cường (RL)":
+        try:
+            # Kiểm tra xem có mô hình được chọn không
+            if "rl_model" not in st.session_state or not st.session_state.rl_model:
+                st.error("❌ Chưa chọn mô hình học tăng cường!")
+                return None
+            
+            # Tạo môi trường RL với bản đồ và tham số hiện tại
+            rl_env = TruckRoutingEnv(
+                map_object=map_data,
+                initial_fuel=initial_fuel,
+                initial_money=initial_money,
+                fuel_per_move=fuel_per_move,
+                gas_station_cost=gas_station_cost,
+                toll_base_cost=toll_base_cost,
+                max_steps_per_episode=2 * grid.shape[0] * grid.shape[1]
+            )
+            
+            # Điều chỉnh tham số dựa trên chiến lược ưu tiên
+            priority_strategy = st.session_state.get('rl_priority_strategy', "Cân bằng (mặc định)")
+            
+            # Áp dụng các điều chỉnh phần thưởng dựa trên chiến lược (điều này sẽ được thực hiện đúng cách nếu environment hỗ trợ)
+            if hasattr(rl_env, 'set_reward_weights'):
+                if priority_strategy == "Tiết kiệm chi phí":
+                    rl_env.set_reward_weights(cost_weight=2.0, time_weight=0.5, safety_weight=1.0)
+                elif priority_strategy == "Nhanh nhất":
+                    rl_env.set_reward_weights(cost_weight=0.5, time_weight=2.0, safety_weight=0.5)
+                elif priority_strategy == "An toàn nhiên liệu":
+                    rl_env.set_reward_weights(cost_weight=0.5, time_weight=0.5, safety_weight=2.0)
+                else:  # Cân bằng
+                    rl_env.set_reward_weights(cost_weight=1.0, time_weight=1.0, safety_weight=1.0)
+            
+            # Tải model RL
+            model_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "saved_models", st.session_state.rl_model)
+            
+            # Tạo agent và tải model
+            agent = DQNAgentTrainer(rl_env)
+            agent.load_model(model_path)
+            
+            # Bắt đầu đo thời gian
+            start_time = time.perf_counter()
+            
+            # Chạy episode và thu thập thông tin
+            observation, _ = rl_env.reset()
+            path = [rl_env.current_pos]  # Đường đi bắt đầu từ vị trí hiện tại
+            visited = [rl_env.current_pos]  # Danh sách các vị trí đã thăm
+            terminated = False
+            truncated = False
+            total_reward = 0
+            fuel_consumed = 0
+            money_spent = 0
+            total_toll_cost = 0
+            total_refuel_cost = 0
+            refuel_count = 0
+            toll_count = 0
+            
+            # Thực hiện episode
+            while not (terminated or truncated):
+                # Dự đoán hành động từ agent
+                action = agent.predict_action(observation)
+                
+                # Thực hiện hành động
+                next_observation, reward, terminated, truncated, info = rl_env.step(action)
+                
+                # Cập nhật tổng phần thưởng
+                total_reward += reward
+                
+                # Cập nhật vị trí vào đường đi nếu đã di chuyển
+                if rl_env.current_pos not in path:
+                    path.append(rl_env.current_pos)
+                
+                # Thêm vào danh sách đã thăm (để animation)
+                if rl_env.current_pos not in visited:
+                    visited.append(rl_env.current_pos)
+                
+                # Cập nhật các số liệu thống kê
+                if action <= 3:  # Các hành động di chuyển
+                    fuel_consumed += fuel_per_move
+                
+                if "toll_paid" in info:
+                    money_spent += info["toll_paid"]
+                    total_toll_cost += info["toll_paid"]
+                    toll_count += 1
+                
+                if "refuel_cost" in info:
+                    money_spent += info["refuel_cost"]
+                    total_refuel_cost += info["refuel_cost"]
+                    refuel_count += 1
+                
+                # Cập nhật observation
+                observation = next_observation
+            
+            # Kết thúc đo thời gian
+            end_time = time.perf_counter()
+            execution_time = end_time - start_time
+            
+            # Tạo trạng thái cho đường đi và animation
+            exploration_states = [(pos, 0) for pos in visited]
+            
+            # Dùng path để tạo truck_states
+            truck_states = []
+            current_fuel = initial_fuel
+            for i, pos in enumerate(path):
+                if i > 0:  # Không tính vị trí đầu tiên
+                    current_fuel -= fuel_per_move
+                truck_states.append((pos, current_fuel))
+            
+            # Tạo thống kê
+            success = rl_env.current_pos == goal
+            
+            stats = {
+                "success_rate": 1.0 if success else 0.0,
+                "execution_time": execution_time,
+                "path_length": len(path) - 1 if path else 0,  # Trừ vị trí bắt đầu
+                "total_reward": total_reward,
+                "fuel": observation["fuel"][0] if "fuel" in observation else 0,
+                "money": observation["money"][0] if "money" in observation else 0,
+                "fuel_consumed": fuel_consumed,
+                "money_spent": money_spent,
+                "toll_cost": total_toll_cost,
+                "refuel_cost": total_refuel_cost,
+                "refuel_count": refuel_count,
+                "toll_count": toll_count,
+                "visited_cells": len(visited),
+                "steps": len(visited),
+                "memory_usage": sys.getsizeof(visited) + sys.getsizeof(path),
+                "is_feasible": success,
+                "reason": "Đến đích thành công" if success else "Không thể đến đích"
+            }
+            
+            # Trả về kết quả
+            return {
+                "path": path,
+                "visited": visited,
+                "exploration_states": exploration_states,
+                "truck_states": truck_states,
+                "stats": stats
+            }
+            
+        except Exception as e:
+            st.error(f"❌ Lỗi khi chạy thuật toán RL: {str(e)}")
+            import traceback
+            print(traceback.format_exc())
+            return None
+    
     # Khởi tạo thuật toán
     if algorithm_name == "BFS":
         algorithm = BFS(grid, initial_money, max_fuel, fuel_per_move, 
@@ -459,7 +621,7 @@ def run_algorithm(algorithm_name: str, map_data: np.ndarray, start: Tuple[int, i
     
     # Chuẩn bị trạng thái cho cả hai chế độ hiển thị
     # 1. Quá trình tìm đường
-    # 2. Xe đi theo đường đã tìm được
+    # 2. Xe đi theo đường đi cuối cùng
     exploration_states = [(pos, 0) for pos in clean_visited]  # Trạng thái cho chế độ tìm đường
     
     # Tạo trạng thái di chuyển xe dựa trên đường đi cuối cùng
@@ -521,7 +683,7 @@ def render_routing_visualization():
         """, unsafe_allow_html=True)
         
         # Chọn thuật toán
-        algorithm_options = ["BFS", "DFS", "A*", "Greedy", "Local Beam Search", "Simulated Annealing", "Genetic Algorithm"]
+        algorithm_options = ["BFS", "DFS", "A*", "Greedy", "Local Beam Search", "Simulated Annealing", "Genetic Algorithm", "Học Tăng Cường (RL)"]
         algorithm_name = st.selectbox("Chọn thuật toán:", algorithm_options)
         
         # Lưu thuật toán đã chọn vào session state
@@ -535,7 +697,8 @@ def render_routing_visualization():
             "Greedy": "Luôn chọn bước đi tốt nhất theo đánh giá heuristic.",
             "Local Beam Search": "Theo dõi k trạng thái cùng lúc thay vì một trạng thái duy nhất.",
             "Simulated Annealing": "Mô phỏng quá trình luyện kim, cho phép chấp nhận giải pháp tệ hơn với xác suất giảm dần theo thời gian.",
-            "Genetic Algorithm": "Mô phỏng quá trình tiến hóa tự nhiên, sử dụng quần thể, chọn lọc, lai ghép và đột biến."
+            "Genetic Algorithm": "Mô phỏng quá trình tiến hóa tự nhiên, sử dụng quần thể, chọn lọc, lai ghép và đột biến.",
+            "Học Tăng Cường (RL)": "Sử dụng học tăng cường (Deep Q-Network) để tự học cách tìm đường tối ưu dựa trên kinh nghiệm."
         }
         st.info(f"**{algorithm_name}**: {algorithm_descriptions.get(algorithm_name, 'Không có mô tả.')}")
         
@@ -547,73 +710,166 @@ def render_routing_visualization():
             st.markdown("##### 🛢️ Nhiên liệu")
             col1, col2 = st.columns(2)
             with col1:
-                max_fuel = st.slider("Dung tích bình xăng (L):", 
-                              min_value=10.0, max_value=50.0, value=20.0, step=1.0)
-                st.session_state.max_fuel = max_fuel
+                st.slider("Dung tích bình xăng (L):", 
+                              min_value=10.0, max_value=50.0, 
+                              value=st.session_state.get('max_fuel', 20.0), 
+                              step=1.0,
+                              key='max_fuel')
             
             with col2:
-                initial_fuel = st.slider("Nhiên liệu ban đầu (L):", 
-                                 min_value=5.0, max_value=max_fuel, value=max_fuel, step=1.0)
-                st.session_state.initial_fuel = initial_fuel
+                # Ensure initial_fuel's max_value is dynamically tied to max_fuel
+                current_max_fuel = st.session_state.get('max_fuel', 20.0)
+                st.slider("Nhiên liệu ban đầu (L):", 
+                                 min_value=5.0, max_value=current_max_fuel, 
+                                 value=st.session_state.get('initial_fuel', current_max_fuel), 
+                                 step=1.0,
+                                 key='initial_fuel')
             
-            fuel_per_move = st.slider("Mức tiêu thụ nhiên liệu (L/ô):", 
-                               min_value=0.1, max_value=1.0, value=0.4, step=0.1)
-            st.session_state.fuel_per_move = fuel_per_move
+            st.slider("Mức tiêu thụ nhiên liệu (L/ô):", 
+                               min_value=0.1, max_value=1.0, 
+                               value=st.session_state.get('fuel_per_move', 0.4), 
+                               step=0.1,
+                               key='fuel_per_move')
         
         with tab2:
             # Cấu hình chi phí
             st.markdown("##### 💰 Chi phí")
-            initial_money = st.slider("Số tiền ban đầu (đ):", 
-                              min_value=1000.0, max_value=5000.0, value=2000.0, step=100.0)
-            st.session_state.initial_money = initial_money
+            st.slider("Số tiền ban đầu (đ):", 
+                              min_value=1000.0, max_value=5000.0, 
+                              value=st.session_state.get('initial_money', 2000.0), 
+                              step=100.0,
+                              key='initial_money')
             
             col1, col2 = st.columns(2)
             with col1:
-                gas_station_cost = st.slider("Chi phí đổ xăng (đ/L):", 
-                                     min_value=10.0, max_value=100.0, value=30.0, step=5.0)
-                st.session_state.gas_station_cost = gas_station_cost
+                st.slider("Chi phí đổ xăng (đ/L):", 
+                                     min_value=10.0, max_value=100.0, 
+                                     value=st.session_state.get('gas_station_cost', 30.0), 
+                                     step=5.0,
+                                     key='gas_station_cost')
             
             with col2:
-                toll_base_cost = st.slider("Chi phí trạm thu phí (đ):", 
-                                   min_value=50.0, max_value=300.0, value=150.0, step=10.0)
-                st.session_state.toll_base_cost = toll_base_cost
+                st.slider("Chi phí trạm thu phí (đ):", 
+                                   min_value=50.0, max_value=300.0, 
+                                   value=st.session_state.get('toll_base_cost', 150.0), 
+                                   step=10.0,
+                                   key='toll_base_cost')
         
         with tab3:
             # Cấu hình tham số thuật toán
             st.markdown("##### 🔧 Tham số riêng của thuật toán")
             
             if algorithm_name == "Local Beam Search":
-                beam_width = st.slider("Beam Width:", min_value=2, max_value=50, value=10, step=1)
-                st.session_state.beam_width = beam_width
+                st.slider("Beam Width:", min_value=2, max_value=50, 
+                            value=st.session_state.get('beam_width', 10), 
+                            step=1,
+                            key='beam_width')
                 
-                use_stochastic = st.checkbox("Sử dụng Stochastic Beam Search", value=True)
-                st.session_state.use_stochastic = use_stochastic
+                st.checkbox("Sử dụng Stochastic Beam Search", 
+                                value=st.session_state.get('use_stochastic', True),
+                                key='use_stochastic')
             
             elif algorithm_name == "Simulated Annealing":
-                initial_temp = st.slider("Nhiệt độ ban đầu:", min_value=10.0, max_value=500.0, value=100.0, step=10.0)
-                st.session_state.initial_temp = initial_temp
+                st.slider("Nhiệt độ ban đầu:", min_value=10.0, max_value=500.0, 
+                            value=st.session_state.get('initial_temp', 100.0), 
+                            step=10.0,
+                            key='initial_temp')
                 
-                cooling_rate = st.slider("Tốc độ làm lạnh:", min_value=0.7, max_value=0.99, value=0.95, step=0.01)
-                st.session_state.cooling_rate = cooling_rate
+                st.slider("Tốc độ làm lạnh:", min_value=0.7, max_value=0.99, 
+                            value=st.session_state.get('cooling_rate', 0.95), 
+                            step=0.01,
+                            key='cooling_rate')
                 
-                steps_per_temp = st.slider("Số bước trên mỗi nhiệt độ:", min_value=10, max_value=100, value=50, step=10)
-                st.session_state.steps_per_temp = steps_per_temp
+                st.slider("Số bước trên mỗi nhiệt độ:", min_value=10, max_value=100, 
+                            value=st.session_state.get('steps_per_temp', 50), 
+                            step=10,
+                            key='steps_per_temp')
             
             elif algorithm_name == "Genetic Algorithm":
-                pop_size = st.slider("Kích thước quần thể:", min_value=10, max_value=100, value=50, step=10)
-                st.session_state.pop_size = pop_size
+                st.slider("Kích thước quần thể:", min_value=10, max_value=100, 
+                            value=st.session_state.get('pop_size', 50), 
+                            step=10,
+                            key='pop_size')
                 
                 col1, col2 = st.columns(2)
                 with col1:
-                    crossover_rate = st.slider("Tỷ lệ lai ghép:", min_value=0.5, max_value=1.0, value=0.8, step=0.05)
-                    st.session_state.crossover_rate = crossover_rate
+                    st.slider("Tỷ lệ lai ghép:", min_value=0.5, max_value=1.0, 
+                                value=st.session_state.get('crossover_rate', 0.8), 
+                                step=0.05,
+                                key='crossover_rate')
                 
                 with col2:
-                    mutation_rate = st.slider("Tỷ lệ đột biến:", min_value=0.05, max_value=0.5, value=0.2, step=0.05)
-                    st.session_state.mutation_rate = mutation_rate
+                    st.slider("Tỷ lệ đột biến:", min_value=0.05, max_value=0.5, 
+                                value=st.session_state.get('mutation_rate', 0.2), 
+                                step=0.05,
+                                key='mutation_rate')
                 
-                generations = st.slider("Số thế hệ:", min_value=10, max_value=200, value=100, step=10)
-                st.session_state.generations = generations
+                st.slider("Số thế hệ:", min_value=10, max_value=200, 
+                            value=st.session_state.get('generations', 100), 
+                            step=10,
+                            key='generations')
+            
+            elif algorithm_name == "Học Tăng Cường (RL)":
+                # Cấu hình đặc biệt cho RL
+                st.markdown("##### 🧠 Mô hình Học Tăng Cường")
+                
+                # Chọn mô hình đã huấn luyện
+                # Tạo một dropdown để chọn mô hình từ thư mục saved_models
+                import os
+                
+                # Đường dẫn đến thư mục saved_models
+                models_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "saved_models")
+                
+                # Kiểm tra xem thư mục có tồn tại không
+                if not os.path.exists(models_dir):
+                    os.makedirs(models_dir, exist_ok=True)
+                    st.warning("⚠️ Thư mục saved_models chưa tồn tại. Đã tạo thư mục mới.")
+                
+                # Lấy danh sách mô hình trong thư mục
+                model_files = [f.replace(".zip", "") for f in os.listdir(models_dir) if f.endswith(".zip")]
+                
+                if not model_files:
+                    st.warning("⚠️ Không tìm thấy mô hình học tăng cường! Vui lòng huấn luyện mô hình trước.")
+                    # Thêm link để mở ứng dụng rl_test.py
+                    st.markdown("""
+                    📝 Bạn có thể huấn luyện mô hình mới bằng cách chạy ứng dụng `rl_test.py`.
+                    """)
+                else:
+                    # Nếu chưa có model được chọn, đặt mô hình đầu tiên là mặc định
+                    default_model = st.session_state.get('rl_model', model_files[0] if model_files else None)
+                    selected_model = st.selectbox(
+                        "Chọn mô hình RL:", 
+                        model_files,
+                        index=model_files.index(default_model) if default_model in model_files else 0
+                    )
+                    
+                    # Lưu mô hình được chọn vào session state
+                    st.session_state.rl_model = selected_model
+                    
+                    # Hiển thị đường dẫn đầy đủ
+                    model_path = os.path.join(models_dir, selected_model)
+                    st.info(f"📁 Đường dẫn mô hình: {model_path}")
+                
+                # Chọn chiến lược ưu tiên (từ hàm phần thưởng)
+                st.markdown("##### 🎯 Chiến lược ưu tiên")
+                priority_strategy = st.selectbox(
+                    "Chiến lược:",
+                    ["Cân bằng (mặc định)", "Tiết kiệm chi phí", "Nhanh nhất", "An toàn nhiên liệu"],
+                    index=0
+                )
+                
+                # Lưu chiến lược được chọn vào session state
+                st.session_state.rl_priority_strategy = priority_strategy
+                
+                # Hiển thị mô tả chiến lược
+                strategy_descriptions = {
+                    "Cân bằng (mặc định)": "Cân bằng giữa thời gian, chi phí và an toàn.",
+                    "Tiết kiệm chi phí": "Ưu tiên tiết kiệm tiền, tránh trạm thu phí khi có thể.",
+                    "Nhanh nhất": "Ưu tiên đường đi ngắn nhất, không quan tâm chi phí.",
+                    "An toàn nhiên liệu": "Luôn đảm bảo mức nhiên liệu an toàn, ưu tiên ghé trạm xăng."
+                }
+                
+                st.info(strategy_descriptions[priority_strategy])
             
             else:
                 st.info(f"Thuật toán {algorithm_name} không có tham số bổ sung để cấu hình.")
@@ -659,6 +915,195 @@ def render_routing_visualization():
         
         # Container cho bản đồ và trực quan hóa
         map_container = st.empty()
+        
+        # CSS cho bản đồ và animation (giống với map_display.py)
+        st.markdown("""
+        <style>
+        /* Reset styles để loại bỏ background từ mọi phần tử */
+        .map-container, .map-container *, .map-container *:before, .map-container *:after {
+            background: transparent !important;
+            background-color: transparent !important;
+            box-shadow: none !important;
+            border: none !important;
+        }
+        
+        .map-container {
+            display: flex;
+            justify-content: center;
+            margin: 20px 0;
+            padding: 25px;
+            border-radius: 20px;
+            transition: all 0.5s ease;
+        }
+        
+        .map-container table {
+            border-collapse: collapse;
+            border-radius: 15px;
+            overflow: hidden;
+            transform: perspective(1200px) rotateX(2deg);
+            transition: all 0.5s ease;
+        }
+        
+        .map-container:hover table {
+            transform: perspective(1200px) rotateX(0deg);
+        }
+        
+        .map-container td {
+            width: 64px;
+            height: 64px;
+            text-align: center;
+            padding: 0;
+            position: relative;
+            border: none;
+            transition: all 0.3s ease;
+            overflow: hidden;
+        }
+        
+        .map-container td > div {
+            width: 100%;
+            height: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            position: relative;
+            transition: all 0.3s ease;
+        }
+        
+        .visited-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: rgba(100, 181, 246, 0.05) !important;
+            z-index: 1;
+            animation: fadeIn 0.7s ease;
+        }
+        
+        .neighbor-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: rgba(255, 215, 0, 0.05) !important;
+            z-index: 2;
+            animation: pulseGlow 1.5s infinite;
+        }
+        
+        .current-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: rgba(255, 69, 0, 0.08) !important;
+            z-index: 3;
+            animation: highlightPulse 1.2s infinite;
+        }
+        
+        .path-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(76, 175, 80, 0.05) !important;
+            z-index: 2;
+            animation: pathGlow 3s infinite;
+        }
+        
+        .obstacle-in-path-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: rgba(220, 53, 69, 0.2) !important;
+            z-index: 10 !important;
+            animation: errorBlink 0.8s infinite;
+        }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; transform: scale(0.95); }
+            to { opacity: 1; transform: scale(1); }
+        }
+        
+        @keyframes pulseGlow {
+            0% { opacity: 0.4; }
+            50% { opacity: 0.2; }
+            100% { opacity: 0.4; }
+        }
+        
+        @keyframes highlightPulse {
+            0% { background-color: rgba(255, 69, 0, 0.08) !important; }
+            50% { background-color: rgba(255, 69, 0, 0.15) !important; }
+            100% { background-color: rgba(255, 69, 0, 0.08) !important; }
+        }
+        
+        @keyframes pathGlow {
+            0% { opacity: 0.4; }
+            50% { opacity: 0.7; }
+            100% { opacity: 0.4; }
+        }
+        
+        @keyframes errorBlink {
+            0% { background-color: rgba(220, 53, 69, 0.2) !important; }
+            50% { background-color: rgba(220, 53, 69, 0.35) !important; }
+            100% { background-color: rgba(220, 53, 69, 0.2) !important; }
+        }
+        
+        .cell-content {
+            position: relative;
+            z-index: 4;
+            font-size: 32px;
+            line-height: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 100%;
+            height: 100%;
+            transition: all 0.3s ease;
+        }
+        
+        .cell-content:hover {
+            transform: scale(1.1);
+        }
+        
+        /* Hiệu ứng khi di chuột qua bản đồ */
+        .map-container tr {
+            transition: all 0.3s ease;
+        }
+        
+        .map-container tr:hover {
+            transform: translateY(-2px);
+        }
+        
+        /* Xóa các đường kẻ giữa các ô */
+        .map-container td::after {
+            display: none;
+        }
+        
+        .current-pos-cell .cell-content {
+            animation: pulseTruck 1.2s infinite ease-in-out;
+            transform-origin: center;
+            z-index: 5;
+        }
+        
+        @keyframes pulseTruck {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.15); }
+            100% { transform: scale(1); }
+        }
+        
+        /* Xe tải luôn hiển thị rõ ràng */
+        .truck-icon {
+            font-size: 40px !important;
+            filter: drop-shadow(0 2px 5px rgba(0,0,0,0.1));
+            color: #FF5722;
+        }
+        </style>
+        """, unsafe_allow_html=True)
         
         # Hiển thị bản đồ ban đầu
         with map_container:
@@ -788,7 +1233,7 @@ def render_routing_visualization():
                             st.session_state.map,
                             current_visited,
                             current_pos,
-                            path if current_step == total_steps - 1 else None,
+                            None,  # Không hiển thị đường đi khi đang tìm đường
                             current_neighbors
                         )
                     
@@ -806,11 +1251,13 @@ def render_routing_visualization():
                             current_neighbors = st.session_state.map.get_neighbors(current_pos)
                         
                         with map_container:
+                            # Chỉ hiển thị đường đi ở bước cuối cùng
+                            display_path = None
                             draw_visualization_step(
                                 st.session_state.map,
                                 current_visited,
                                 current_pos,
-                                path if current_step == total_steps - 1 else None,
+                                display_path,
                                 current_neighbors
                             )
                     else:
@@ -820,7 +1267,7 @@ def render_routing_visualization():
                                 st.session_state.map,
                                 visited,
                                 None,
-                                path
+                                path  # Chỉ hiển thị đường đi ở bước cuối cùng
                             )
             else:
                 # Chế độ 2: Hiển thị quá trình xe di chuyển trên đường đi cuối cùng
@@ -834,11 +1281,14 @@ def render_routing_visualization():
                         visited_positions = path[:current_step+1]
                         
                         with map_container:
+                            # Không hiển thị xe tải ở vị trí bắt đầu khi animation đang chạy
                             map_display.draw_map(
                                 map_data=st.session_state.map,
+                                start_pos=None,  # Không hiển thị xe tải ở vị trí bắt đầu khi đang di chuyển
                                 visited=visited_positions,
                                 current_pos=current_pos,
-                                path=path
+                                # Không hiển thị đường đi mũi tên khi xe đang di chuyển
+                                path=None
                             )
                         
                         # Tăng bước và đợi
@@ -852,11 +1302,22 @@ def render_routing_visualization():
                             visited_positions = path[:current_step+1]
                             
                             with map_container:
+                                # Chỉ hiển thị đường đi mũi tên khi đã đến đích
+                                display_path = path if current_step == total_steps else None
+                                
+                                # Tạo start_pos custom để xử lý ẩn icon xe tải ở vị trí bắt đầu
+                                custom_start_pos = None
+                                # Chỉ hiển thị xe tải ở vị trí bắt đầu khi KHÔNG đang chạy animation
+                                # và chỉ ở trạng thái ban đầu (step=0) hoặc đã hoàn thành (step=total_steps)
+                                if not st.session_state.get("is_playing", False) and (current_step == 0 or current_step == total_steps):
+                                    custom_start_pos = st.session_state.start_pos  # Sử dụng vị trí bắt đầu từ session state
+                                
                                 map_display.draw_map(
                                     map_data=st.session_state.map,
+                                    start_pos=custom_start_pos,
                                     visited=visited_positions,
                                     current_pos=current_pos,
-                                    path=path
+                                    path=display_path
                                 )
     
     # Hiển thị thống kê chi tiết ở phần dưới cùng sau khi có kết quả
@@ -868,7 +1329,12 @@ def render_routing_visualization():
         
         with st.expander("📊 Xem thống kê chi tiết", expanded=False):
             stats = st.session_state.current_result["stats"]
-            stat_tabs = st.tabs(["Quá trình tìm kiếm", "Nhiên liệu", "Chi phí & Tiền", "Hiệu suất"])
+            
+            # Kiểm tra nếu đang sử dụng thuật toán RL thì thêm tab cho RL
+            if st.session_state.algorithm == "Học Tăng Cường (RL)":
+                stat_tabs = st.tabs(["Quá trình tìm kiếm", "Nhiên liệu", "Chi phí & Tiền", "Hiệu suất", "RL Metrics"])
+            else:
+                stat_tabs = st.tabs(["Quá trình tìm kiếm", "Nhiên liệu", "Chi phí & Tiền", "Hiệu suất"])
             
             with stat_tabs[0]:
                 # Thông tin về quá trình tìm kiếm
@@ -928,7 +1394,204 @@ def render_routing_visualization():
                     else:
                         st.metric("⭐ Chất lượng giải pháp", "Không có")
             
+            # Tab hiển thị chỉ số RL nếu sử dụng thuật toán RL
+            if st.session_state.algorithm == "Học Tăng Cường (RL)" and len(stat_tabs) > 4:
+                with stat_tabs[4]:
+                    st.markdown("##### 🧠 Chỉ số Học Tăng Cường")
+                    
+                    # Hiển thị các thông số đặc trưng của RL
+                    rl_cols1 = st.columns(3)
+                    with rl_cols1[0]:
+                        if "total_reward" in stats:
+                            st.metric("Tổng phần thưởng", f"{stats['total_reward']:.2f}")
+                        else:
+                            st.metric("Tổng phần thưởng", "N/A")
+                    
+                    with rl_cols1[1]:
+                        if "refuel_count" in stats:
+                            st.metric("Số lần đổ xăng", stats['refuel_count'])
+                        else:
+                            st.metric("Số lần đổ xăng", "0")
+                    
+                    with rl_cols1[2]:
+                        if "toll_count" in stats:
+                            st.metric("Số trạm thu phí đã qua", stats['toll_count'])
+                        else:
+                            st.metric("Số trạm thu phí đã qua", "0")
+                    
+                    # Thông tin về chiến lược và model
+                    st.markdown("##### 🎯 Thông tin model")
+                    rl_cols2 = st.columns(2)
+                    with rl_cols2[0]:
+                        priority_strategy = st.session_state.get('rl_priority_strategy', "Cân bằng (mặc định)")
+                        st.info(f"**Chiến lược ưu tiên**: {priority_strategy}")
+                    
+                    with rl_cols2[1]:
+                        if "rl_model" in st.session_state:
+                            st.info(f"**Model đã sử dụng**: {st.session_state.rl_model}")
+                        else:
+                            st.info("**Model đã sử dụng**: Không xác định")
+                    
+                    # Hiển thị ghi chú về khả năng thích ứng
+                    if priority_strategy == "Tiết kiệm chi phí":
+                        st.success("💡 Agent ưu tiên tránh trạm thu phí khi có thể và tối ưu hóa lượng nhiên liệu sử dụng.")
+                    elif priority_strategy == "Nhanh nhất":
+                        st.success("💡 Agent ưu tiên tìm đường ngắn nhất, có thể chấp nhận chi phí cao hơn.")
+                    elif priority_strategy == "An toàn nhiên liệu":
+                        st.success("💡 Agent duy trì mức nhiên liệu an toàn và ghé trạm xăng thường xuyên hơn.")
+                    else:
+                        st.success("💡 Agent cân bằng giữa thời gian, chi phí và an toàn.")
+            
             # Thông báo về việc lưu thống kê ở phía dưới
             if hasattr(st.session_state, 'last_stats_file') and st.session_state.last_stats_file:
                 filename = os.path.basename(st.session_state.last_stats_file)
-                st.success(f"✅ Đã lưu thống kê vào file: {filename}") 
+                st.success(f"✅ Đã lưu thống kê vào file: {filename}")
+
+    st.markdown("---") # Phân cách
+    render_and_or_sandbox_section() # Gọi phần thử nghiệm AND-OR
+
+# Helper function to format plan for Streamlit display
+def format_plan_for_streamlit(plan, indent_level=0, current_depth=0, max_depth=15):
+    # DEBUG: Print the plan being processed at current level
+    # print(f"DEBUG: format_plan_for_streamlit(indent={indent_level}, depth={current_depth}) received plan: {plan}")
+
+    base_indent = "  " * indent_level
+
+    if current_depth > max_depth:
+        return f"{base_indent}... (Chi tiết kế hoạch quá sâu, đã được cắt bớt tại đây)"
+
+    if plan == FAILURE:
+        # print(f"DEBUG: Plan is FAILURE")
+        return f"{base_indent}Thất bại: Không tìm thấy kế hoạch."
+    if plan == NO_PLAN:
+        # print(f"DEBUG: Plan is NO_PLAN")
+        return f"{base_indent}Mục tiêu đạt được (không cần hành động thêm)."
+
+    if not isinstance(plan, dict):
+        # print(f"DEBUG: Plan is not a dict: {type(plan)}")
+        return f"{base_indent}{str(plan)}"
+
+    plan_type = plan.get("type")
+    # print(f"DEBUG: Plan type: {plan_type}")
+    output_lines = []
+
+    if plan_type == "OR_PLAN_STEP":
+        action = plan.get('action')
+        sub_plan = plan.get('sub_plan')
+        output_lines.append(f"{base_indent}NẾU TRẠNG THÁI CHO PHÉP, LÀM: {action}")
+        if sub_plan is not None:
+            # Recursive call increments current_depth
+            output_lines.append(format_plan_for_streamlit(sub_plan, indent_level + 1, current_depth + 1, max_depth))
+    
+    elif plan_type == "AND_PLAN_CONDITIONAL":
+        output_lines.append(f"{base_indent}MONG ĐỢI một trong các kết quả sau:")
+        contingencies = plan.get('contingencies', {})
+        if not contingencies:
+             output_lines.append(f"{base_indent}  (Không có tình huống dự phòng nào được định nghĩa)")
+        for desc, contingent_plan in contingencies.items():
+            output_lines.append(f"{base_indent}  - NẾU ({desc}):")
+            if contingent_plan is not None:
+                # Recursive call increments current_depth
+                output_lines.append(format_plan_for_streamlit(contingent_plan, indent_level + 2, current_depth + 1, max_depth))
+            
+    elif plan_type == "AND_PLAN_SINGLE_OUTCOME":
+        desc = plan.get('description')
+        actual_plan = plan.get('plan')
+        output_lines.append(f"{base_indent}KẾT QUẢ MONG ĐỢI ({desc}):")
+        if actual_plan is not None:
+            # Recursive call increments current_depth
+            output_lines.append(format_plan_for_streamlit(actual_plan, indent_level + 1, current_depth + 1, max_depth))
+    
+    else:
+        # print(f"DEBUG: Unknown plan type or structure for plan: {plan}")
+        output_lines.append(f"{base_indent}Cấu trúc kế hoạch không xác định: {str(plan)}")
+        
+    # print(f"DEBUG: output_lines before join (indent={indent_level}): {output_lines}")
+    final_output = "\n".join(line for line in output_lines if line is not None and line.strip() != "")
+    # print(f"DEBUG: final_output after join (indent={indent_level}): repr='{repr(final_output)}'")
+    return final_output
+
+def render_and_or_sandbox_section():
+    st.header("Tìm Kiếm AND-OR Dự Phòng trên Bản Đồ Hiện Tại")
+    st.markdown("""
+    Thực hiện thuật toán AND-OR search trên bản đồ và với điểm bắt đầu/kết thúc bạn đã chọn.
+    Thuật toán tìm kế hoạch đảm bảo, tính đến khả năng xe hỏng (10% sau mỗi lần đến một ô mới) và có thể sửa chữa.
+    Lưu ý: Thuật toán này có thể chạy chậm trên bản đồ lớn do khám phá không gian trạng thái phức tạp.
+    """)
+
+    # Check if map, start_pos, and end_pos are available in session_state
+    if "map" not in st.session_state or st.session_state.map is None:
+        st.warning("⚠️ Vui lòng tạo bản đồ trước.")
+        return
+    if "start_pos" not in st.session_state or st.session_state.start_pos is None:
+        st.warning("⚠️ Vui lòng thiết lập vị trí bắt đầu trên bản đồ.")
+        return
+    if "end_pos" not in st.session_state or st.session_state.end_pos is None:
+        st.warning("⚠️ Vui lòng thiết lập điểm đích trên bản đồ.")
+        return
+
+    # Display the current start and end points for confirmation
+    st.info(f"Điểm xuất phát hiện tại: {st.session_state.start_pos}, Điểm đích hiện tại: {st.session_state.end_pos}")
+
+    if st.button("Bắt đầu Tìm Kế Hoạch AND-OR trên Bản Đồ", key="and_or_find_plan_on_map_button"):
+        map_data = st.session_state.map
+        # Ensure map_data.grid is the actual numpy grid, or adjust as needed
+        # Example: grid = map_data.grid if hasattr(map_data, 'grid') else map_data
+        # For now, assuming map_data directly has a .grid attribute.
+        # Based on your get_grid_from_map_data, it seems map_data might be an object with a .grid attribute.
+        grid = getattr(map_data, 'grid', map_data) # Safely get .grid or use map_data itself
+        if not isinstance(grid, np.ndarray):
+            st.error("Lỗi: Dữ liệu bản đồ không phải là một numpy array hợp lệ.")
+            return
+            
+        start_coord = st.session_state.start_pos # Should be (x,y)
+        dest_coord = st.session_state.end_pos   # Should be (x,y)
+
+        # Pass the OBSTACLE_CELL definition to problem if it's not hardcoded there
+        # For now, AndOrProblem hardcodes self.OBSTACLE_CELL = -1
+        # If your global OBSTACLE_CELL is different, this needs to be reconciled.
+        problem = AndOrProblem(map_grid=grid,
+                               start_coord=start_coord,
+                               final_dest_coord=dest_coord)
+        
+        with st.spinner(f"Đang tìm kiếm kế hoạch AND-OR từ {start_coord} đến {dest_coord}..."):
+            solution_plan = solve_and_or_problem(problem)
+        
+        # DEBUG: Xác nhận thuật toán đã chạy xong
+        st.info("DEBUG: solve_and_or_problem đã hoàn thành.") 
+
+        if solution_plan == FAILURE:
+            st.error("Không tìm thấy kế hoạch dự phòng đảm bảo trên bản đồ này.")
+        else:
+            st.success("Đã tìm thấy kế hoạch dự phòng đảm bảo!")
+            
+            # Bước 1: Định dạng kế hoạch (đây có thể là phần tốn thời gian)
+            with st.spinner("Đang định dạng kế hoạch..."):
+                plan_details = format_plan_for_streamlit(solution_plan)
+            
+            # Bước 2: Lấy độ dài thực tế của chuỗi đã định dạng
+            actual_display_length = len(plan_details)
+            st.write(f"Thông tin gỡ lỗi: Độ dài thực tế của chi tiết kế hoạch đã định dạng: {actual_display_length} ký tự.")
+
+            # Bước 3: Hiển thị kế hoạch, có cảnh báo và cắt bớt nếu cần
+            if actual_display_length > 100000: 
+                 st.warning(f"Chi tiết kế hoạch rất lớn ({actual_display_length} ký tự). Việc hiển thị có thể làm chậm trình duyệt.")
+
+            with st.spinner("Đang chuẩn bị hiển thị chi tiết kế hoạch..."):
+                st.markdown("#### Chi tiết Kế Hoạch:")
+                
+                TRUNCATION_THRESHOLD = 200000 
+                display_key = "and_or_map_plan_details_area"
+
+                if actual_display_length > TRUNCATION_THRESHOLD:
+                    st.info(f"Chi tiết kế hoạch quá dài ({actual_display_length} ký tự). Nội dung sau đây đã được cắt bớt để đảm bảo hiệu suất.")
+                    truncated_details = plan_details[:TRUNCATION_THRESHOLD] + "\n\n... (NỘI DUNG ĐÃ ĐƯỢC CẮT BỚT DO QUÁ DÀI)"
+                    st.text_area("Kế hoạch AND-OR (đã cắt bớt):", value=truncated_details, height=400, key=display_key)
+                else:
+                    st.text_area("Kế hoạch AND-OR:", value=plan_details, height=400, key=display_key)
+
+# Make sure to import necessary components at the top of the file
+# from core.and_or_search_logic.problem_definition import AndOrProblem
+# from core.and_or_search_logic.search_algorithm import solve_and_or_problem, FAILURE, NO_PLAN
+# import streamlit as st
+# (These imports should be added at the top if not already present) 
