@@ -18,6 +18,9 @@ from core.algorithms.greedy import GreedySearch
 from core.algorithms.local_beam import LocalBeamSearch
 from core.algorithms.simulated_annealing import SimulatedAnnealing
 from core.algorithms.genetic_algorithm import GeneticAlgorithm
+from core.algorithms.ucs import UCS
+from core.algorithms.ids import IDS
+from core.algorithms.idastar import IDAStar
 from core.rl_environment import TruckRoutingEnv  # Import RL environment
 from core.algorithms.rl_DQNAgent import DQNAgentTrainer  # Import RL agent
 from ui import map_display
@@ -495,9 +498,18 @@ def run_algorithm(algorithm_name: str, map_data: np.ndarray, start: Tuple[int, i
     elif algorithm_name == "DFS":
         algorithm = DFS(grid, initial_money, max_fuel, fuel_per_move, 
                      gas_station_cost, toll_base_cost, initial_fuel)
+    elif algorithm_name == "UCS":
+        algorithm = UCS(grid, initial_money, max_fuel, fuel_per_move, 
+                     gas_station_cost, toll_base_cost, initial_fuel)
+    elif algorithm_name == "IDS":
+        algorithm = IDS(grid, initial_money, max_fuel, fuel_per_move, 
+                     gas_station_cost, toll_base_cost, initial_fuel)
     elif algorithm_name == "A*":
         algorithm = AStar(grid, initial_money, max_fuel, fuel_per_move, 
                        gas_station_cost, toll_base_cost, initial_fuel)
+    elif algorithm_name == "IDA*":
+        algorithm = IDAStar(grid, initial_money, max_fuel, fuel_per_move, 
+                         gas_station_cost, toll_base_cost, initial_fuel)
     elif algorithm_name == "Greedy":
         # Thêm debug log
         print(f"Khởi tạo Greedy với: initial_money={initial_money}, max_fuel={max_fuel}, initial_fuel={initial_fuel}")
@@ -592,18 +604,56 @@ def run_algorithm(algorithm_name: str, map_data: np.ndarray, start: Tuple[int, i
     # Thêm thông tin về hiệu suất
     stats["execution_time"] = execution_time
     stats["memory_usage"] = len(algorithm.get_visited()) * 16  # Ước tính bộ nhớ sử dụng (bytes) - mỗi vị trí là tuple 2 số
+    stats["algorithm"] = algorithm_name  # Add algorithm name to stats
     
     # Đánh giá tính khả thi và chất lượng giải pháp
-    if path and stats["fuel"] > 0:
-        stats["success_rate"] = 1.0
-        stats["solution_quality"] = stats["path_length"]  # Độ dài đường đi thực tế
-        stats["is_feasible"] = True
-        stats["reason"] = "Đường đi khả thi"
+    if path:
+        # Kiểm tra tính khả thi của đường đi với nhiên liệu ban đầu
+        try:
+            is_feasible, reason = algorithm.is_path_feasible(path, algorithm.initial_fuel)
+            
+            # Tính toán xem đường đi có đúng bằng giới hạn nhiên liệu không
+            fuel_limit_steps = int(algorithm.initial_fuel / algorithm.FUEL_PER_MOVE)
+            path_steps = len(path) - 1  # Trừ 1 vì path bao gồm cả điểm bắt đầu
+            is_at_fuel_limit = path_steps == fuel_limit_steps
+            
+            # Thêm thông tin chi tiết về nhiên liệu vào stats
+            stats["initial_fuel"] = algorithm.initial_fuel
+            stats["fuel_per_move"] = algorithm.FUEL_PER_MOVE
+            stats["fuel_limit_steps"] = fuel_limit_steps
+            stats["path_steps"] = path_steps
+            stats["total_fuel_needed"] = path_steps * algorithm.FUEL_PER_MOVE
+            stats["fuel_margin"] = algorithm.initial_fuel - (path_steps * algorithm.FUEL_PER_MOVE)
+            stats["is_at_fuel_limit"] = is_at_fuel_limit
+            
+            if is_feasible and stats["fuel"] >= 0:
+                stats["success_rate"] = 1.0
+                stats["solution_quality"] = stats["path_length"]  # Độ dài đường đi thực tế
+                stats["is_feasible"] = True
+                
+                if is_at_fuel_limit:
+                    stats["reason"] = f"Đường đi khả thi (đúng bằng giới hạn nhiên liệu {algorithm.initial_fuel}L)"
+                else:
+                    fuel_margin = stats["fuel_margin"]
+                    stats["reason"] = f"Đường đi khả thi (còn dư {fuel_margin:.1f}L nhiên liệu)"
+            else:
+                stats["success_rate"] = 0.0
+                stats["solution_quality"] = float('inf')
+                stats["is_feasible"] = False
+                stats["reason"] = reason if reason else "Không tìm thấy đường đi khả thi"
+                print(f"CẢNH BÁO: Đường đi được tìm thấy nhưng không khả thi: {reason}")
+        except AttributeError as e:
+            # Fallback in case algorithm doesn't have initial_fuel attribute
+            print(f"CẢNH BÁO: Thuật toán không có thuộc tính initial_fuel, dùng giá trị mặc định: {str(e)}")
+            stats["success_rate"] = 0.0
+            stats["solution_quality"] = float('inf')
+            stats["is_feasible"] = False
+            stats["reason"] = "Lỗi kiểm tra tính khả thi"
     else:
         stats["success_rate"] = 0.0
         stats["solution_quality"] = float('inf')
         stats["is_feasible"] = False
-        stats["reason"] = "Không tìm thấy đường đi khả thi"
+        stats["reason"] = "Không tìm thấy đường đi"
     
     # Lấy danh sách các ô đã thăm theo thứ tự thời gian cho animation
     visited_list = algorithm.get_visited()
@@ -628,7 +678,11 @@ def run_algorithm(algorithm_name: str, map_data: np.ndarray, start: Tuple[int, i
     truck_states = []
     if path:
         # Giả lập fuel giảm dần theo từng bước đi
-        current_fuel = initial_fuel
+        try:
+            current_fuel = algorithm.initial_fuel  # Try to use algorithm's attribute first
+        except AttributeError:
+            current_fuel = initial_fuel  # Fallback to the local variable
+            
         for i, pos in enumerate(path):
             if i > 0:  # Không tính vị trí đầu tiên
                 current_fuel -= fuel_per_move
@@ -640,12 +694,18 @@ def run_algorithm(algorithm_name: str, map_data: np.ndarray, start: Tuple[int, i
         stats_file = save_algorithm_stats(algorithm_name, stats)
         st.session_state.last_stats_file = stats_file
     
+    # Thêm lý do không thể đến đích vào kết quả trả về nếu có
+    path_failure_reason = ""
+    if hasattr(algorithm, 'path_failure_reason'):
+        path_failure_reason = algorithm.path_failure_reason
+    
     return {
         "path": path,  # Đã được xác thực triệt để
         "visited": clean_visited,  # Đã lọc bỏ chướng ngại vật
         "exploration_states": exploration_states,  # Trạng thái cho chế độ tìm đường
         "truck_states": truck_states,  # Trạng thái cho chế độ xe di chuyển
-        "stats": stats
+        "stats": stats,
+        "path_failure_reason": path_failure_reason  # Lý do không thể đến đích
     }
 
 def render_routing_visualization():
@@ -683,7 +743,7 @@ def render_routing_visualization():
         """, unsafe_allow_html=True)
         
         # Chọn thuật toán
-        algorithm_options = ["BFS", "DFS", "A*", "Greedy", "Local Beam Search", "Simulated Annealing", "Genetic Algorithm", "Học Tăng Cường (RL)"]
+        algorithm_options = ["BFS", "DFS", "UCS", "IDS", "A*", "IDA*", "Greedy", "Local Beam Search", "Simulated Annealing", "Genetic Algorithm", "Học Tăng Cường (RL)"]
         algorithm_name = st.selectbox("Chọn thuật toán:", algorithm_options)
         
         # Lưu thuật toán đã chọn vào session state
@@ -691,9 +751,12 @@ def render_routing_visualization():
         
         # Hiển thị mô tả thuật toán
         algorithm_descriptions = {
-            "BFS": "Tìm kiếm theo chiều rộng, đảm bảo tìm đường đi ngắn nhất về số bước.",
-            "DFS": "Tìm kiếm theo chiều sâu, phù hợp cho không gian tìm kiếm sâu.",
+            "BFS": "Tìm kiếm theo chiều rộng, tìm được đường đi ngắn nhất theo số bước.",
+            "DFS": "Tìm kiếm theo chiều sâu, phù hợp khi có nhiều nhánh và muốn tìm đường đi nhanh chóng.",
+            "UCS": "Tìm kiếm theo chi phí đồng nhất, đảm bảo tìm đường đi có chi phí thấp nhất.",
+            "IDS": "Tìm kiếm theo chiều sâu tăng dần, kết hợp ưu điểm của DFS và BFS.",
             "A*": "Tìm kiếm theo A*, kết hợp cả chi phí thực tế và heuristic.",
+            "IDA*": "Tìm kiếm IDA* kết hợp giữa tiết kiệm bộ nhớ của tìm kiếm sâu dần và hiệu quả của A*, thích hợp cho bản đồ lớn và phức tạp.",
             "Greedy": "Luôn chọn bước đi tốt nhất theo đánh giá heuristic.",
             "Local Beam Search": "Theo dõi k trạng thái cùng lúc thay vì một trạng thái duy nhất.",
             "Simulated Annealing": "Mô phỏng quá trình luyện kim, cho phép chấp nhận giải pháp tệ hơn với xác suất giảm dần theo thời gian.",
@@ -897,7 +960,14 @@ def render_routing_visualization():
                         if result["stats"]["is_feasible"]:
                             st.success("✅ Đã tìm thấy đường đi khả thi!")
                         else:
-                            st.warning("⚠️ Đã tìm được một phần đường đi nhưng không thể đến đích!")
+                            # Hiển thị lý do nếu có
+                            reason = ""
+                            
+                            # Lấy thông tin từ thuật toán được khởi tạo trong run_algorithm
+                            if "path_failure_reason" in result:
+                                reason = f" (Lý do: {result['path_failure_reason']})"
+                            
+                            st.warning(f"⚠️ Đã tìm được một phần đường đi nhưng không thể đến đích!{reason}")
                     else:
                         st.error("❌ Không thể tìm được đường đi!")
                 except Exception as e:
@@ -1118,17 +1188,31 @@ def render_routing_visualization():
             # Thông tin cơ bản về đường đi - đặt ngay dưới bản đồ
             basic_info_cols = st.columns(4)
             with basic_info_cols[0]:
-                st.metric("Thuật toán", st.session_state.algorithm)
+                st.metric("Thuật toán", stats["algorithm"])
             with basic_info_cols[1]:
                 st.metric("Độ dài đường đi", stats["path_length"])
             with basic_info_cols[2]:
                 st.metric("Thời gian chạy", f"{stats['execution_time']*1000:.2f}ms")
             with basic_info_cols[3]:
                 is_feasible = stats.get("is_feasible", False)
+                reason = stats.get("reason", "")
+                
                 if is_feasible:
-                    st.metric("Trạng thái", "✅ Khả thi")
+                    if "đúng bằng giới hạn nhiên liệu" in reason:
+                        st.metric("Trạng thái", "⚠️ Giới hạn nhiên liệu", delta="Khả thi")
+                    else:
+                        st.metric("Trạng thái", "✅ Khả thi")
                 else:
                     st.metric("Trạng thái", "⚠️ Không khả thi", delta="Hạn chế")
+            
+            # Fuel metrics row
+            if stats.get("is_at_fuel_limit", False):
+                st.warning(f"⚠️ **Lưu ý**: Đường đi sử dụng hết {stats.get('initial_fuel', 0):.1f}L nhiên liệu ({stats.get('path_steps', 0)} bước với {stats.get('fuel_per_move', 0):.1f}L/bước).")
+            
+            # Hiển thị chi tiết lý do nếu có
+            reason = stats.get("reason", "")
+            if reason:
+                st.info(f"**Chi tiết:** {reason}", icon="ℹ️")
             
             # Chọn chế độ hiển thị ngay dưới thông tin cơ bản
             st.markdown("##### 🎬 Chọn chế độ minh họa:")
@@ -1350,12 +1434,29 @@ def render_routing_visualization():
                 # Thông tin về nhiên liệu
                 fuel_cols = st.columns(3)
                 with fuel_cols[0]:
-                    initial_fuel = st.session_state.get('initial_fuel', 20.0)
-                    st.metric("Xăng ban đầu", f"{initial_fuel:.1f}L")
+                    initial_fuel = stats.get("initial_fuel", 0)
+                    st.metric("Nhiên liệu ban đầu", f"{initial_fuel:.1f}L")
+                
                 with fuel_cols[1]:
-                    st.metric("Xăng đã tiêu thụ", f"{stats.get('fuel_consumed', 0):.1f}L")
+                    fuel_needed = stats.get("total_fuel_needed", 0)
+                    is_at_limit = stats.get("is_at_fuel_limit", False)
+                    
+                    if is_at_limit:
+                        st.metric("Nhiên liệu cần thiết", f"⚠️ {fuel_needed:.1f}L", delta="Đúng giới hạn", delta_color="off")
+                    else:
+                        st.metric("Nhiên liệu cần thiết", f"{fuel_needed:.1f}L")
+                
                 with fuel_cols[2]:
-                    st.metric("Xăng còn lại", f"{stats.get('fuel', 0):.1f}L")
+                    fuel_margin = stats.get("fuel_margin", 0)
+                    if fuel_margin <= 0:
+                        st.metric("Nhiên liệu dư", "0.0L", delta="Đã sử dụng hết", delta_color="inverse")
+                    else:
+                        st.metric("Nhiên liệu dư", f"{fuel_margin:.1f}L")
+                
+                # Hiển thị chi tiết lý do nếu có
+                reason = stats.get("reason", "")
+                if reason:
+                    st.info(f"**Chi tiết:** {reason}", icon="ℹ️")
             
             with stat_tabs[2]:
                 # Thông tin về chi phí

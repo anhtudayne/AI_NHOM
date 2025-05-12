@@ -8,6 +8,31 @@ import pandas as pd
 def render_map_config():
     st.title("🗺️ Tạo Bản Đồ & Cấu Hình")
     
+    # Các hàm callback cho các thanh trượt
+    def update_map_on_change():
+        """Callback để cập nhật bản đồ khi các tham số thay đổi"""
+        if 'toll_ratio' in st.session_state and 'gas_ratio' in st.session_state and 'brick_ratio' in st.session_state and 'random_seed' in st.session_state and 'map_size' in st.session_state:
+            # Lấy các giá trị từ session state
+            toll_ratio = st.session_state.toll_ratio
+            gas_ratio = st.session_state.gas_ratio
+            brick_ratio = st.session_state.brick_ratio
+            random_seed = st.session_state.random_seed
+            map_size = st.session_state.map_size
+            
+            # Tạo bản đồ mới với các tham số đã cập nhật
+            np.random.seed(random_seed)
+            st.session_state.map = Map.generate_random(
+                map_size, 
+                toll_ratio/100, 
+                gas_ratio/100, 
+                brick_ratio/100
+            )
+            # Sử dụng các vị trí đã được tự động tạo trong map
+            st.session_state.start_pos = st.session_state.map.start_pos
+            st.session_state.end_pos = st.session_state.map.end_pos
+            
+            st.toast("✅ Đã áp dụng cài đặt mới thành công!")
+
     # Layout chính
     col_sidebar, col_main = st.columns([2, 3])
     
@@ -28,7 +53,9 @@ def render_map_config():
                 min_value=8, 
                 max_value=15, 
                 value=10,
-                help="Chọn kích thước của bản đồ (số hàng và cột)"
+                help="Chọn kích thước của bản đồ (số hàng và cột)",
+                key="map_size",
+                on_change=update_map_on_change
             )
             
             # Thiết lập cho phương thức tạo tự động
@@ -49,7 +76,9 @@ def render_map_config():
                     min_value=0, 
                     max_value=15, 
                     value=5,
-                    help="Tỷ lệ ô trạm thu phí trên bản đồ"
+                    help="Tỷ lệ ô trạm thu phí trên bản đồ",
+                    key="toll_ratio",
+                    on_change=update_map_on_change
                 )
                 
                 gas_ratio = st.slider(
@@ -57,7 +86,9 @@ def render_map_config():
                     min_value=2, 
                     max_value=10, 
                     value=4,
-                    help="Tỷ lệ ô trạm xăng trên bản đồ"
+                    help="Tỷ lệ ô trạm xăng trên bản đồ",
+                    key="gas_ratio",
+                    on_change=update_map_on_change
                 )
                 
                 brick_ratio = st.slider(
@@ -65,7 +96,9 @@ def render_map_config():
                     min_value=0, 
                     max_value=30, 
                     value=15, 
-                    help="Tỷ lệ ô không đi được (gạch) trên bản đồ"
+                    help="Tỷ lệ ô không đi được (gạch) trên bản đồ",
+                    key="brick_ratio",
+                    on_change=update_map_on_change
                 )
                 
                 # Tự động tính toán tỷ lệ đường thông thường và hiển thị cho người dùng
@@ -81,8 +114,11 @@ def render_map_config():
                     min_value=0, 
                     max_value=9999, 
                     value=42,
-                    help="Dùng seed để tạo bản đồ ngẫu nhiên có thể tái hiện lại"
+                    help="Dùng seed để tạo bản đồ ngẫu nhiên có thể tái hiện lại",
+                    key="random_seed",
+                    on_change=update_map_on_change
                 )
+                
                 
                 # Tab cho các chế độ tạo bản đồ
                 map_mode = st.radio(
@@ -95,18 +131,7 @@ def render_map_config():
                     # Nút tạo bản đồ mới
                     if st.button("🔄 Tạo bản đồ", use_container_width=True):
                         with st.spinner("Đang tạo bản đồ mới..."):
-                            np.random.seed(random_seed)
-                            st.session_state.map = Map.generate_random(
-                                map_size, 
-                                toll_ratio/100, 
-                                gas_ratio/100, 
-                                brick_ratio/100
-                            )
-                            # Sử dụng các vị trí đã được tự động tạo trong map
-                            st.session_state.start_pos = st.session_state.map.start_pos
-                            st.session_state.end_pos = st.session_state.map.end_pos
-                            
-                            st.toast("✅ Đã tạo bản đồ mới thành công!")
+                            update_map_on_change()
                 else:
                     # Nút tạo bản đồ mẫu
                     if st.button("🎮 Tạo bản đồ mẫu", use_container_width=True):
@@ -239,7 +264,9 @@ def render_map_config():
                         # Kiểm tra xem vị trí có phải là đường đi không (loại 0)
                         if st.session_state.map.grid[start_row][start_col] == 0:
                             st.session_state.start_pos = (start_row, start_col)
+                            st.session_state.map.start_pos = (start_row, start_col)  # Cập nhật trực tiếp vào đối tượng map
                             st.success(f"✅ Đã đặt vị trí bắt đầu tại ({start_row}, {start_col})")
+                            st.experimental_rerun()  # Làm mới trang để hiển thị thay đổi
                         else:
                             st.error("❌ Vị trí bắt đầu phải là ô đường thông thường!")
                 
@@ -276,7 +303,9 @@ def render_map_config():
                                 st.error("❌ Điểm đích không thể trùng với vị trí bắt đầu!")
                             else:
                                 st.session_state.end_pos = (end_row, end_col)
+                                st.session_state.map.end_pos = (end_row, end_col)  # Cập nhật trực tiếp vào đối tượng map
                                 st.success(f"✅ Đã đặt điểm đích tại ({end_row}, {end_col})")
+                                st.experimental_rerun()  # Làm mới trang để hiển thị thay đổi
                         else:
                             st.error("❌ Điểm đích phải là ô đường thông thường!")
                 
@@ -294,7 +323,13 @@ def render_map_config():
                         selected_indices = np.random.choice(len(road_cells), 2, replace=False)
                         st.session_state.start_pos = road_cells[selected_indices[0]]
                         st.session_state.end_pos = road_cells[selected_indices[1]]
+                        
+                        # Cập nhật trực tiếp vào đối tượng map
+                        st.session_state.map.start_pos = st.session_state.start_pos
+                        st.session_state.map.end_pos = st.session_state.end_pos
+                        
                         st.success(f"✅ Đã ngẫu nhiên đặt vị trí bắt đầu tại {st.session_state.start_pos} và điểm đích tại {st.session_state.end_pos}")
+                        st.experimental_rerun()  # Làm mới trang để hiển thị thay đổi
                     else:
                         st.error("❌ Không đủ ô đường thông thường để đặt vị trí bắt đầu và điểm đích!")
             

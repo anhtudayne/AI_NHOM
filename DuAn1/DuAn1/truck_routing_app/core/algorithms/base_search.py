@@ -126,7 +126,8 @@ class BaseSearch(ABC):
         self.MAX_MONEY = initial_money if initial_money is not None else self.DEFAULT_MAX_MONEY
         
         # Nhiên liệu ban đầu
-        self.current_fuel = initial_fuel if initial_fuel is not None else self.MAX_FUEL
+        self.initial_fuel = initial_fuel if initial_fuel is not None else self.MAX_FUEL
+        self.current_fuel = self.initial_fuel  # Sử dụng initial_fuel đã lưu
         
         self.fuel_consumed = 0.0  # Lượng nhiên liệu tiêu thụ cho đường đi cuối cùng
         self.fuel_refilled = 0.0  # Lượng nhiên liệu đã đổ thêm tại các trạm xăng
@@ -836,6 +837,24 @@ class BaseSearch(ABC):
              # Nếu sau tất cả chỉ còn 0 hoặc 1 điểm, đường đi không hợp lệ
              print("ERROR: Path became too short after all validation and repair. Rejecting path.")
              return []  # TRẢ VỀ RỖNG nếu quá ngắn
+        
+        # Bước 4: KIỂM TRA TÍNH KHẢ THI DỰA TRÊN NHIÊN LIỆU VÀ CHI PHÍ
+        # Kiểm tra xem trên đường đi có trạm xăng nào không
+        has_gas_station = False
+        for pos in valid_path_final:
+            cell_type = self.grid[pos[1], pos[0]]
+            if cell_type == self.GAS_STATION_CELL:
+                has_gas_station = True
+                break
+        
+        # Nếu không có trạm xăng, đường đi phải đủ ngắn để đi được với lượng nhiên liệu ban đầu
+        if not has_gas_station:
+            max_steps = int(self.initial_fuel / self.FUEL_PER_MOVE)
+            if len(valid_path_final) > max_steps + 1:  # +1 vì path bao gồm cả điểm xuất phát
+                print(f"ERROR: Path requires {len(valid_path_final)-1} steps but only has fuel for {max_steps} steps. Truncating path.")
+                valid_path_final = valid_path_final[:max_steps + 1]
+                if hasattr(self, 'path_failure_reason'):
+                    self.path_failure_reason = f"hết nhiên liệu (chỉ đi được tối đa {max_steps} ô với {self.initial_fuel}L)"
 
         print(f"VALIDATE: Path successfully validated. Final path length: {len(valid_path_final)}.")
         return valid_path_final  # Trả về đường đi đã được xác thực và đảm bảo triệt để
