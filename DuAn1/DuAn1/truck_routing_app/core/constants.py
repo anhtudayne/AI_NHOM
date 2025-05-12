@@ -16,7 +16,7 @@ class CellType(IntEnum):
 class MovementCosts:
     """Chi phí di chuyển cơ bản"""
     FUEL_PER_MOVE: float = 0.4      # Nhiên liệu tiêu thụ mỗi bước (L)
-    MAX_FUEL: float = 3.0           # Dung tích bình xăng tối đa (L)
+    MAX_FUEL: float = 70.0           # Dung tích bình xăng tối đa (L)
     LOW_FUEL_THRESHOLD: float = 1.0  # Ngưỡng xăng thấp (L)
 
 @dataclass

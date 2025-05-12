@@ -16,7 +16,7 @@ from core.map import Map
 from core.rl_environment import TruckRoutingEnv
 from core.algorithms.rl_DQNAgent import DQNAgentTrainer
 
-def create_env(map_object, initial_fuel=5.0, initial_money=1000.0, fuel_per_move=0.3):
+def create_env(map_object, initial_fuel=70.0, initial_money=1500.0, fuel_per_move=0.3):
     """
     Create a TruckRoutingEnv environment with specified parameters.
     

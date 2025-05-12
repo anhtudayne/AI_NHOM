@@ -43,20 +43,18 @@ class RLEvaluator:
     
     def _load_maps(self):
         """Load all maps from the maps directory."""
-        maps = []
+        self.maps = []
         for map_file in os.listdir(self.maps_dir):
             if map_file.endswith(".json"):
-                map_path = os.path.join(self.maps_dir, map_file)
                 try:
-                    map_obj = Map.load(map_path)
-                    if map_obj is not None:
-                        maps.append((map_file, map_obj))
+                    map_obj = Map.load(os.path.join(self.maps_dir, map_file))
+                    self.maps.append((map_file, map_obj))
                 except Exception as e:
                     print(f"Error loading map {map_file}: {e}")
-        return maps
+        self.maps.sort() # Sort for consistent evaluation order
     
-    def evaluate_rl_agent(self, model_path, n_episodes=10, initial_fuel=5.0, 
-                          initial_money=1000.0, fuel_per_move=0.3, map_filter=None):
+    def evaluate_rl_agent(self, model_path, n_episodes=10, initial_fuel=70.0, 
+                          initial_money=1500.0, fuel_per_move=0.3, map_filter=None):
         """
         Evaluate a trained RL agent on all maps.
         
@@ -242,8 +240,8 @@ class RLEvaluator:
         with open(os.path.join(report_dir, 'summary.json'), 'w') as f:
             json.dump(summary, f, indent=2)
     
-    def evaluate_traditional_algorithm(self, algorithm_name, n_runs=5, initial_fuel=5.0, 
-                                      initial_money=1000.0, fuel_per_move=0.3):
+    def evaluate_traditional_algorithm(self, algorithm_name, n_runs=5, initial_fuel=70.0, 
+                                      initial_money=1500.0, fuel_per_move=0.3):
         """
         Evaluate a traditional pathfinding algorithm on all maps.
         
@@ -325,7 +323,7 @@ class RLEvaluator:
         return df
     
     def compare_algorithms(self, rl_model_path, algorithms_to_compare=None, n_episodes=10, n_runs=5,
-                          initial_fuel=5.0, initial_money=1000.0, fuel_per_move=0.3):
+                          initial_fuel=70.0, initial_money=1500.0, fuel_per_move=0.3):
         """
         Compare RL agent with traditional algorithms.
         
@@ -570,8 +568,8 @@ class RLEvaluator:
         with open(os.path.join(report_dir, "report.html"), "w") as f:
             f.write(html_content)
     
-    def evaluate_single_episode(self, model_path, map_obj, initial_fuel=5.0, 
-                               initial_money=1000.0, fuel_per_move=0.3, render=False):
+    def evaluate_single_episode(self, model_path, map_obj, initial_fuel=70.0, 
+                               initial_money=1500.0, fuel_per_move=0.3, render=False):
         """
         Evaluate a single episode for visualization in the UI.
         
@@ -695,8 +693,8 @@ class RLEvaluator:
         
         return path, metrics, step_by_step_info
     
-    def compare_with_algorithm(self, model_path, algorithm_name, map_obj, initial_fuel=5.0,
-                              initial_money=1000.0, fuel_per_move=0.3):
+    def compare_with_algorithm(self, model_path, algorithm_name, map_obj, initial_fuel=70.0,
+                              initial_money=1500.0, fuel_per_move=0.3):
         """
         Compare RL agent with a traditional algorithm on a single map.
         

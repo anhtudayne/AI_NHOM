@@ -1,0 +1,17 @@
+{
+  "saved_at": "2025-05-12 22:36:17",
+  "total_timesteps": 125000,
+  "env_id": "unknown",
+  "use_double_dqn": false,
+  "use_dueling_network": false,
+  "use_prioritized_replay": false,
+  "learning_rate": 0.0005,
+  "gamma": 0.99,
+  "batch_size": 64,
+  "metrics_summary": {
+    "last_reward": 3.9,
+    "mean_reward_last_100": 3.899999999999998,
+    "success_rate": null,
+    "training_time": 557.38893
+  }
+}

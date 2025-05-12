@@ -25,10 +25,10 @@ def parse_args():
     parser.add_argument('--brick_ratio', type=float, default=0.1,
                         help='Ratio of obstacles in random maps (default: 0.1)')
     
-    parser.add_argument('--initial_fuel', type=float, default=5.0,
-                        help='Initial fuel for the truck (default: 5.0)')
-    parser.add_argument('--initial_money', type=float, default=1000.0,
-                        help='Initial money for the truck (default: 1000.0)')
+    parser.add_argument('--initial_fuel', type=float, default=70.0,
+                        help='Initial fuel for the truck (default: 70.0)')
+    parser.add_argument('--initial_money', type=float, default=1500.0,
+                        help='Initial money for the truck (default: 1500.0)')
     parser.add_argument('--fuel_per_move', type=float, default=0.3,
                         help='Fuel consumption per move (default: 0.3)')
     

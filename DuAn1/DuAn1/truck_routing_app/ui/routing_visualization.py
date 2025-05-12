@@ -335,8 +335,8 @@ def run_algorithm(algorithm_name: str, map_data: np.ndarray, start: Tuple[int, i
         return None
     
     # Lấy các tham số cấu hình từ session_state
-    initial_money = st.session_state.get('initial_money', 2000.0)
-    max_fuel = st.session_state.get('max_fuel', 20.0)
+    initial_money = st.session_state.get('initial_money', 1500.0)
+    max_fuel = st.session_state.get('max_fuel', 70.0)
     fuel_per_move = st.session_state.get('fuel_per_move', 0.4)
     gas_station_cost = st.session_state.get('gas_station_cost', 30.0)
     toll_base_cost = st.session_state.get('toll_base_cost', 150.0)

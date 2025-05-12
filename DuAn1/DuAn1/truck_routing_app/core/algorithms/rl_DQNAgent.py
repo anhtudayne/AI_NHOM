@@ -49,6 +49,10 @@ class MetricsCallback(BaseCallback):
         if len(self.model.ep_info_buffer) > 0 and len(self.model.ep_info_buffer[-1]) > 0:
             if "r" in self.model.ep_info_buffer[-1]:
                 self.metrics["episode_rewards"].append(self.model.ep_info_buffer[-1]["r"])
+                # Thêm log reward trung bình mỗi 1000 bước
+                if self.num_timesteps % 1000 == 0 and len(self.metrics["episode_rewards"]) >= 10:
+                    mean_reward = float(np.mean(self.metrics["episode_rewards"][-10:]))
+                    print(f"[MetricsCallback] Step {self.num_timesteps}: Mean reward (last 10 episodes): {mean_reward:.2f}")
             
             if "l" in self.model.ep_info_buffer[-1]:
                 self.metrics["episode_lengths"].append(self.model.ep_info_buffer[-1]["l"])
@@ -84,7 +88,7 @@ class MetricsCallback(BaseCallback):
         self.metrics["timesteps"].append(self.num_timesteps)
         
         # Lưu metrics định kỳ
-        if self.num_timesteps % 10000 == 0 and self.metrics_path is not None:
+        if self.num_timesteps % 1000 == 0 and self.metrics_path is not None:
             self.save_metrics()
         
         return True
@@ -179,10 +183,13 @@ class DQNAgentTrainer:
         except Exception as e:
             print(f"DEBUG: PyTorch initialization error: {e}")
             
-        # Lưu các cờ cho kỹ thuật nâng cao
+        # Lưu các cờ cho kỹ thuật nâng cao VÀO INSTANCE VARIABLES
         self.use_double_dqn = use_double_dqn
         self.use_dueling_network = use_dueling_network
         self.use_prioritized_replay = use_prioritized_replay
+        # Các tham số PER cũng nên được lưu nếu cần thiết khi load, nhưng hiện tại chỉ cần cờ
+
+        # Lưu các tham số PER để có thể sử dụng khi thiết lập buffer
         self.prioritized_replay_alpha = prioritized_replay_alpha
         self.prioritized_replay_beta0 = prioritized_replay_beta0
         

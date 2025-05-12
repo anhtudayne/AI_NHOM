@@ -9,6 +9,7 @@ import os
 import datetime
 import math
 import random
+from pathlib import Path
 
 class Map:
     """Base class for the routing environment map."""
@@ -29,301 +30,164 @@ class Map:
         if not hasattr(self, 'end_pos'):
             self.end_pos = None
     
-    @classmethod
-    def generate_random(cls, size, toll_ratio, gas_ratio, brick_ratio):
+    def has_path_from_start_to_end(self):
         """
-        Tạo bản đồ ngẫu nhiên với tỷ lệ các loại ô cho trước
-        
-        Parameters:
-        - size: Kích thước bản đồ
-        - toll_ratio: Tỷ lệ ô trạm thu phí
-        - gas_ratio: Tỷ lệ ô đổ xăng
-        - brick_ratio: Tỷ lệ ô gạch (không đi được)
+        Kiểm tra có tồn tại đường đi từ start đến end (chỉ đi qua các ô không phải vật cản).
+        Trả về True nếu có đường đi, False nếu không.
+        """
+        if self.start_pos is None or self.end_pos is None:
+            return False
+        from collections import deque
+        visited = set()
+        queue = deque([self.start_pos])
+        while queue:
+            pos = queue.popleft()
+            if pos == self.end_pos:
+                return True
+            visited.add(pos)
+            x, y = pos
+            for dx, dy in [(-1,0),(1,0),(0,-1),(0,1)]:
+                nx, ny = x+dx, y+dy
+                if 0 <= nx < self.size and 0 <= ny < self.size:
+                    if (nx, ny) not in visited and self.grid[ny][nx] >= 0:
+                        queue.append((nx, ny))
+        return False
+
+    @classmethod
+    def generate_random(cls, size: int, num_tolls: int, num_gas: int, num_obstacles: int, max_attempts=10):
+        """
+        Tạo bản đồ ngẫu nhiên với kích thước và số lượng điểm đặc biệt cho trước.
+        Cố gắng tạo tối đa max_attempts lần để đảm bảo có đường đi từ start đến end.
+
+        Args:
+            size: Kích thước bản đồ.
+            num_tolls: Số lượng trạm thu phí mong muốn.
+            num_gas: Số lượng trạm xăng mong muốn.
+            num_obstacles: Số lượng vật cản mong muốn.
+            max_attempts: Số lần thử tối đa để tạo bản đồ hợp lệ.
+            
+        Returns:
+            Map: Đối tượng bản đồ ngẫu nhiên đã tạo, hoặc None nếu không thành công.
+        """
+        for _ in range(max_attempts):
+            map_obj = cls._generate_random_once(size, num_tolls, num_gas, num_obstacles)
+            if map_obj and map_obj.has_path_from_start_to_end():
+                return map_obj
+        print(f"[Warning] Map.generate_random: Failed to generate a solvable map after {max_attempts} attempts with params: size={size}, tolls={num_tolls}, gas={num_gas}, obstacles={num_obstacles}")
+        return None # Trả về None nếu không tạo được map hợp lệ sau max_attempts
+
+    @classmethod
+    def _generate_random_once(cls, size: int, num_tolls: int, num_gas: int, num_obstacles: int):
+        """Tạo một bản đồ ngẫu nhiên (một lần thử) với số lượng điểm đặc biệt.
+        Lưu ý: Không đảm bảo có đường đi từ start đến end trong một lần thử này.
         """
         map_obj = cls(size)
-        total_cells = size * size
-        
-        # Tính số lượng ô cho mỗi loại
-        num_toll = int(total_cells * toll_ratio)
-        num_gas = int(total_cells * gas_ratio)
-        num_brick = int(total_cells * brick_ratio)
-        
-        # Đảm bảo số lượng phù hợp với kích thước bản đồ
-        # Giới hạn số lượng trạm xăng dựa trên kích thước bản đồ
-        max_gas_stations = max(1, min(5, size // 3))
-        num_gas = min(num_gas, max_gas_stations)
-        
-        # Giới hạn số lượng trạm thu phí dựa trên kích thước bản đồ
-        max_toll_stations = max(1, min(8, size // 2))
-        num_toll = min(num_toll, max_toll_stations)
-        
-        # Giảm tỷ lệ vật cản để đảm bảo tính liền mạch
-        max_brick_ratio = 0.3  # Giảm tỷ lệ tối đa xuống 30%
-        if brick_ratio > max_brick_ratio:
-            brick_ratio = max_brick_ratio
-            num_brick = int(total_cells * brick_ratio)
-        
-        total_special_cells = num_toll + num_gas + num_brick
-        
-        # Đảm bảo không quá nhiều ô đặc biệt
-        if total_special_cells > total_cells * 0.5:  # Giảm tỷ lệ tối đa xuống 50%
-            # Giảm theo tỷ lệ
-            scale_factor = (total_cells * 0.5) / total_special_cells
-            num_toll = int(num_toll * scale_factor)
-            num_gas = int(num_gas * scale_factor)
-            num_brick = int(num_brick * scale_factor)
-            total_special_cells = num_toll + num_gas + num_brick
-        
-        # Tạo grid ban đầu toàn đường thường
-        grid = np.zeros((size, size), dtype=int)
-        
-        # Bước 1: Tạo các đường chính xuyên qua bản đồ
-        # Đường ngang chính
-        mid_row = size // 2
-        for j in range(size):
-            grid[mid_row][j] = 0
-        
-        # Đường dọc chính
-        mid_col = size // 2
-        for i in range(size):
-            grid[i][mid_col] = 0
-        
-        # Đường chéo chính
-        for i in range(size):
-            grid[i][i] = 0
+        # Khởi tạo grid với toàn bộ là đường (0), sẽ đặt vật cản sau
+        grid = np.zeros((size, size), dtype=int) 
+
+        # --- SỬ DỤNG TRỰC TIẾP SỐ LƯỢNG num_tolls, num_gas, num_obstacles --- 
+        # Các giá trị này đã được truyền vào, không cần tính từ ratio nữa.
         
         # Để theo dõi các vị trí đã được sử dụng bởi các phần tử đặc biệt
         occupied_positions = set()
         
-        # Bước 2: Đặt trạm xăng - đảm bảo phân bố đều
+        # Bước 1.5: Chọn và đặt Start/End Position vào occupied_positions
+        # Cố gắng chọn start/end không trùng nhau và không ở rìa bản đồ nếu có thể
+        start_pos = None
+        end_pos = None
+        for _ in range(size*size): # Giới hạn số lần thử
+             # Ưu tiên chọn ở khu vực giữa bản đồ hơn một chút
+             pad = max(1, size // 4)
+             start_y = np.random.randint(pad, max(pad+1, size-pad))
+             start_x = np.random.randint(pad, max(pad+1, size-pad))
+             end_y = np.random.randint(pad, max(pad+1, size-pad))
+             end_x = np.random.randint(pad, max(pad+1, size-pad))
+             
+             _start_pos = (start_x, start_y)
+             _end_pos = (end_x, end_y)
+
+             if _start_pos != _end_pos:
+                 start_pos = _start_pos
+                 end_pos = _end_pos
+                 occupied_positions.add(start_pos)
+                 occupied_positions.add(end_pos)
+                 map_obj.start_pos = start_pos
+                 map_obj.end_pos = end_pos
+                 break # Đã tìm được vị trí hợp lệ
+
+        if start_pos is None or end_pos is None:
+             print("[Warning] _generate_random_once: Could not find distinct start/end positions.")
+             # Nếu không tìm được sau nhiều lần thử, chọn ngẫu nhiên bất kỳ
+             start_pos = (np.random.randint(0, size), np.random.randint(0, size))
+             end_pos = start_pos
+             while end_pos == start_pos:
+                  end_pos = (np.random.randint(0, size), np.random.randint(0, size))
+             occupied_positions.add(start_pos)
+             occupied_positions.add(end_pos)
+             map_obj.start_pos = start_pos
+             map_obj.end_pos = end_pos
+
+        # Bước 2: Đặt trạm xăng
         gas_positions = []
-        if num_gas > 0:
-            # Chia bản đồ thành các khu vực để đảm bảo phân bố đều trạm xăng
-            sections = math.ceil(math.sqrt(num_gas))
-            section_size = size / sections
-            
-            gas_placed = 0
-            
-            # Đặt trạm xăng ở từng vùng, đảm bảo khoảng cách hợp lý
-            for i in range(sections):
-                for j in range(sections):
-                    if gas_placed < num_gas:
-                        # Tính khoảng giữa của vùng
-                        center_row = int((i + 0.5) * section_size)
-                        center_col = int((j + 0.5) * section_size)
-                        
-                        # Thêm nhiễu ngẫu nhiên để tránh quá đều
-                        offset = int(section_size / 4)
-                        
-                        # Thử tối đa 5 vị trí trong vùng này
-                        for _ in range(5):
-                            row = min(max(0, center_row + np.random.randint(-offset, offset)), size-1)
-                            col = min(max(0, center_col + np.random.randint(-offset, offset)), size-1)
-                            
-                            pos = (row, col)
-                            # Chỉ đặt trạm xăng trên đường thông thường và vị trí chưa bị chiếm
-                            if grid[row][col] == 0 and pos not in occupied_positions:
-                                grid[row][col] = 2  # Đặt trạm xăng
-                                gas_positions.append(pos)
-                                occupied_positions.add(pos)
-                                gas_placed += 1
-                                break
-        
-        # Bước 3: Đặt trạm thu phí - tránh đặt quá gần trạm xăng và đảm bảo phân bố đều
+        gas_placed_count = 0
+        max_gas_attempts = num_gas * 20 # Tăng số lần thử
+        current_gas_attempts = 0
+        while gas_placed_count < num_gas and current_gas_attempts < max_gas_attempts:
+            current_gas_attempts += 1
+            row, col = np.random.randint(0, size), np.random.randint(0, size)
+            pos = (col, row) # Lưu ý: tuple là (x, y) -> (col, row)
+            # Chỉ đặt nếu là đường và chưa bị chiếm
+            if grid[row, col] == 0 and pos not in occupied_positions:
+                 grid[row, col] = 2  # Đặt trạm xăng
+                 gas_positions.append(pos)
+                 occupied_positions.add(pos)
+                 gas_placed_count += 1
+        if gas_placed_count < num_gas:
+            print(f"[Warning] _generate_random_once: Placed only {gas_placed_count}/{num_gas} gas stations.")
+
+        # Bước 3: Đặt trạm thu phí
         toll_positions = []
-        if num_toll > 0:
-            min_distance_from_gas = max(2, size // 6)  # Khoảng cách tối thiểu từ trạm xăng
-            
-            # Đặt trạm thu phí dọc theo các đường chính
-            attempts = 0
-            max_attempts = num_toll * 5  # Giới hạn số lần thử để tránh vòng lặp vô hạn
-            
-            while len(toll_positions) < num_toll and attempts < max_attempts:
-                attempts += 1
-                
-                # Chọn ngẫu nhiên một vị trí trên đường chính
-                if np.random.random() < 0.5:
-                    # Chọn trên đường ngang
-                    row = mid_row
-                    col = np.random.randint(0, size)
-                else:
-                    # Chọn trên đường dọc
-                    row = np.random.randint(0, size)
-                    col = mid_col
-                
-                pos = (row, col)
-                # Bỏ qua nếu vị trí đã bị chiếm
-                if pos in occupied_positions:
-                    continue
-                
-                # Kiểm tra khoảng cách với các trạm xăng
-                too_close_to_gas = False
-                for gas_pos in gas_positions:
-                    gas_row, gas_col = gas_pos
-                    distance = math.sqrt((gas_row - row)**2 + (gas_col - col)**2)
-                    if distance < min_distance_from_gas:
-                        too_close_to_gas = True
-                        break
-                
-                # Kiểm tra khoảng cách với các trạm thu phí khác
-                too_close_to_toll = False
-                min_toll_distance = max(2, size // 8)
-                for toll_pos in toll_positions:
-                    toll_row, toll_col = toll_pos
-                    distance = math.sqrt((toll_row - row)**2 + (toll_col - col)**2)
-                    if distance < min_toll_distance:
-                        too_close_to_toll = True
-                        break
-                
-                # Nếu vị trí phù hợp, đặt trạm thu phí
-                if not too_close_to_gas and not too_close_to_toll and grid[row][col] == 0:
-                    grid[row][col] = 1  # Đặt trạm thu phí
-                    toll_positions.append(pos)
-                    occupied_positions.add(pos)
+        toll_placed_count = 0
+        max_toll_attempts = num_tolls * 20 # Tăng số lần thử
+        current_toll_attempts = 0
+        while toll_placed_count < num_tolls and current_toll_attempts < max_toll_attempts:
+            current_toll_attempts += 1
+            row, col = np.random.randint(0, size), np.random.randint(0, size)
+            pos = (col, row)
+            # Chỉ đặt nếu là đường và chưa bị chiếm
+            if grid[row, col] == 0 and pos not in occupied_positions:
+                 grid[row, col] = 1  # Đặt trạm thu phí
+                 toll_positions.append(pos)
+                 occupied_positions.add(pos)
+                 toll_placed_count += 1
+        if toll_placed_count < num_tolls:
+            print(f"[Warning] _generate_random_once: Placed only {toll_placed_count}/{num_tolls} toll stations.")
         
-        # Bước 4: Đặt các vật cản - tạo các nhóm và đường ngăn cách
+        # Bước 4: Đặt các vật cản
         obstacle_positions = []
-        if num_brick > 0:
-            # Chiến lược: Tạo các khối vật cản nhỏ và phân tán
-            num_clusters = min(2, size // 4)  # Giảm số lượng cụm
-            bricks_per_cluster = num_brick // (num_clusters + 1)
-            clusters_placed = 0
-            
-            for _ in range(num_clusters):
-                # Chọn tâm cho cụm vật cản
-                center_row = np.random.randint(size // 4, size - size // 4)
-                center_col = np.random.randint(size // 4, size - size // 4)
-                center_pos = (center_row, center_col)
-                
-                # Kiểm tra xem tâm có gần các đối tượng đặc biệt không
-                too_close = center_pos in occupied_positions
-                if not too_close:
-                    for sp_pos in occupied_positions:
-                        sp_row, sp_col = sp_pos
-                        if abs(sp_row - center_row) < 3 and abs(sp_col - center_col) < 3:
-                            too_close = True
-                            break
-                
-                if too_close:
-                    continue
-                
-                # Đặt các vật cản theo hình dạng ngẫu nhiên quanh tâm
-                min_cluster_size = 1
-                max_cluster_size = max(min_cluster_size + 1, min(3, size // 4))
-                
-                # Ensure max_cluster_size is greater than min_cluster_size
-                if max_cluster_size <= min_cluster_size:
-                    max_cluster_size = min_cluster_size + 1
-                    
-                cluster_size = np.random.randint(min_cluster_size, max_cluster_size)  # Giảm kích thước cụm
-                bricks_in_this_cluster = 0
-                
-                for i in range(max(0, center_row - cluster_size), min(size, center_row + cluster_size + 1)):
-                    for j in range(max(0, center_col - cluster_size), min(size, center_col + cluster_size + 1)):
-                        pos = (i, j)
-                        # Xác suất đặt vật cản giảm dần theo khoảng cách từ tâm
-                        dist_from_center = abs(i - center_row) + abs(j - center_col)
-                        if dist_from_center <= cluster_size and grid[i][j] == 0 and pos not in occupied_positions:
-                            # Xác suất đặt vật cản giảm theo khoảng cách từ tâm
-                            if np.random.random() > dist_from_center / (2 * cluster_size):
-                                grid[i][j] = -1  # Đặt vật cản
-                                obstacle_positions.append(pos)
-                                occupied_positions.add(pos)
-                                bricks_in_this_cluster += 1
-                                
-                                if bricks_in_this_cluster >= bricks_per_cluster:
-                                    break
-                    
-                    if bricks_in_this_cluster >= bricks_per_cluster:
-                        break
-                
-                clusters_placed += 1
-            
-            # Đặt ngẫu nhiên số vật cản còn lại
-            num_random_bricks = num_brick - sum(1 for pos in obstacle_positions)
-            if num_random_bricks > 0:
-                attempts = 0
-                max_brick_attempts = num_random_bricks * 5
-                
-                while len(obstacle_positions) < num_brick and attempts < max_brick_attempts:
-                    attempts += 1
-                    row = np.random.randint(0, size)
-                    col = np.random.randint(0, size)
-                    pos = (row, col)
-                    
-                    # Không đặt vật cản quá gần trạm xăng hoặc trạm thu phí
-                    too_close = pos in occupied_positions
-                    if not too_close:
-                        for sp_pos in gas_positions + toll_positions:
-                            sp_row, sp_col = sp_pos
-                            if abs(sp_row - row) < 2 and abs(sp_col - col) < 2:
-                                too_close = True
-                                break
-                    
-                    if not too_close and grid[row][col] == 0:
-                        grid[row][col] = -1  # Đặt vật cản
-                        obstacle_positions.append(pos)
-                        occupied_positions.add(pos)
-        
+        obstacle_placed_count = 0
+        max_obstacle_attempts = num_obstacles * 10 # Số lần thử hợp lý
+        current_obstacle_attempts = 0
+        while obstacle_placed_count < num_obstacles and current_obstacle_attempts < max_obstacle_attempts:
+             current_obstacle_attempts += 1
+             row, col = np.random.randint(0, size), np.random.randint(0, size)
+             pos = (col, row)
+             # Chỉ đặt nếu là đường và chưa bị chiếm
+             if grid[row, col] == 0 and pos not in occupied_positions:
+                 grid[row, col] = -1  # Đặt vật cản
+                 obstacle_positions.append(pos)
+                 occupied_positions.add(pos) # Thêm vào vị trí đã chiếm để các vật cản khác không đè lên
+                 obstacle_placed_count += 1
+        if obstacle_placed_count < num_obstacles:
+            print(f"[Warning] _generate_random_once: Placed only {obstacle_placed_count}/{num_obstacles} obstacles.")
+
+        # Đảm bảo start_pos và end_pos cuối cùng không phải là vật cản
+        if map_obj.start_pos is not None and grid[map_obj.start_pos[1], map_obj.start_pos[0]] == -1:
+             grid[map_obj.start_pos[1], map_obj.start_pos[0]] = 0 # Đảm bảo là đường đi
+        if map_obj.end_pos is not None and grid[map_obj.end_pos[1], map_obj.end_pos[0]] == -1:
+             grid[map_obj.end_pos[1], map_obj.end_pos[0]] = 0 # Đảm bảo là đường đi
+
         map_obj.grid = grid
-        
-        # Thiết lập vị trí bắt đầu và kết thúc một cách ngẫu nhiên nhưng hợp lý
-        # 1. Tìm các ô đường thường (loại 0) để đặt điểm bắt đầu và điểm đích
-        available_positions = []
-        edge_positions = []  # Vị trí ở rìa bản đồ
-        
-        for i in range(size):
-            for j in range(size):
-                pos = (i, j)
-                if grid[i][j] == 0 and pos not in occupied_positions:  # Chỉ xem xét các ô đường thường và chưa bị chiếm
-                    available_positions.append(pos)
-                    
-                    # Phân loại vị trí ở rìa và ở giữa
-                    if i < 2 or i >= size - 2 or j < 2 or j >= size - 2:
-                        edge_positions.append(pos)
-        
-        # Nếu không có vị trí thích hợp, không thiết lập vị trí bắt đầu/kết thúc
-        if not available_positions:
-            return map_obj
-            
-        # 2. Ưu tiên đặt điểm bắt đầu ở rìa bản đồ
-        if edge_positions:
-            start_positions = edge_positions
-        else:
-            start_positions = available_positions
-            
-        if start_positions:
-            map_obj.start_pos = start_positions[np.random.randint(0, len(start_positions))]
-            # Loại bỏ vị trí đã chọn cho điểm bắt đầu
-            available_positions = [pos for pos in available_positions if pos != map_obj.start_pos]
-            occupied_positions.add(map_obj.start_pos)
-        
-        # 3. Đặt điểm đích ở nơi cách xa điểm bắt đầu
-        if not available_positions:
-            return map_obj  # Không còn vị trí phù hợp
-            
-        # Sắp xếp các vị trí còn lại theo khoảng cách từ xa đến gần so với điểm bắt đầu
-        if map_obj.start_pos:
-            start_row, start_col = map_obj.start_pos
-            
-            # Tính toán khoảng cách Manhattan từ mỗi điểm đến điểm bắt đầu
-            positions_with_distance = []
-            for pos in available_positions:
-                row, col = pos
-                distance = abs(row - start_row) + abs(col - start_col)
-                positions_with_distance.append((pos, distance))
-            
-            # Sắp xếp theo khoảng cách giảm dần (xa nhất trước)
-            positions_with_distance.sort(key=lambda x: x[1], reverse=True)
-            
-            # Lấy 25% vị trí xa nhất làm ứng viên cho điểm đích
-            top_quarter = max(1, len(positions_with_distance) // 4)
-            candidate_positions = [pos for pos, dist in positions_with_distance[:top_quarter]]
-            
-            if candidate_positions:
-                map_obj.end_pos = candidate_positions[np.random.randint(0, len(candidate_positions))]
-                occupied_positions.add(map_obj.end_pos)
-        
         return map_obj
     
     @classmethod
@@ -477,29 +341,26 @@ class Map:
             'brick_cells': np.sum(self.grid == -1)
         }
     
-    def save(self, filename=None):
+    def save(self, full_filepath: str):
         """
-        Lưu bản đồ vào file
+        Lưu bản đồ vào file với đường dẫn đầy đủ được cung cấp.
         
         Parameters:
-        - filename: Tên file để lưu (nếu không có sẽ tạo tên dựa trên thời gian)
+        - full_filepath: Đường dẫn đầy đủ (bao gồm cả tên file) để lưu.
         
         Returns:
-        - Đường dẫn đến file đã lưu
+        - Đường dẫn đến file đã lưu (chính là full_filepath)
         """
-        if not os.path.exists('maps'):
-            os.makedirs('maps')
+        # Đảm bảo thư mục cha tồn tại
+        parent_dir = os.path.dirname(full_filepath)
+        if parent_dir and not os.path.exists(parent_dir):
+            os.makedirs(parent_dir, exist_ok=True)
         
-        # Tạo tên file dựa trên thời gian nếu không có tên file được cung cấp
-        if not filename:
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"map_{self.size}x{self.size}_{timestamp}.json"
+        # Đảm bảo full_filepath có đuôi .json (nếu cần)
+        # Hiện tại, giả định generate_maps sẽ đảm bảo tên file có .json
+        # if not full_filepath.endswith('.json'):
+        #     full_filepath += '.json' # Hoặc raise error
         
-        # Đảm bảo filename có đuôi .json
-        if not filename.endswith('.json'):
-            filename += '.json'
-        
-        # Lưu cả bản đồ hiện tại vào latest_map.json
         data = {
             'size': self.size,
             'grid': self.grid.tolist(),
@@ -509,68 +370,89 @@ class Map:
         }
         
         # Lưu vào file chỉ định
-        filepath = os.path.join('maps', filename)
-        with open(filepath, 'w') as f:
+        with open(full_filepath, 'w') as f:
             json.dump(data, f)
         
-        # Lưu vào latest_map.json
-        with open('maps/latest_map.json', 'w') as f:
-            json.dump(data, f)
-        
-        return filepath
+        # Tạm thời comment out việc lưu 'latest_map.json'
+        # # Lưu vào latest_map.json
+        # # Cần xác định vị trí hợp lý cho latest_map.json nếu vẫn muốn giữ
+        # # Ví dụ, lưu vào thư mục gốc của MAPS_DIR
+        # global_maps_dir_path = Path(full_filepath).parents[2] # Giả định cấu trúc MAPS_DIR/session/type/file
+        # # This assumption about parents[2] is fragile.
+        # # A better way would be to pass MAPS_DIR root if this feature is needed.
+        # try:
+        #     # Attempt to save latest_map.json if a root 'maps' dir can be inferred or is configured
+        #     # For now, this is disabled to prevent errors.
+        #     # For example, if we knew the root of all maps storage:
+        #     # maps_root = get_configured_maps_root() # Placeholder for a function to get this
+        #     # if maps_root and (maps_root / 'latest_map.json').parent.exists():
+        #     #    with open(maps_root / 'latest_map.json', 'w') as f:
+        #     #        json.dump(data, f)
+        #     pass
+        # except Exception as e:
+        #     print(f"DEBUG: Could not save latest_map.json due to: {e}")
+            
+        return full_filepath
     
     @classmethod
-    def load(cls, filename='latest_map.json'):
+    def load(cls, full_filepath: str):
         """
-        Tải bản đồ từ file
+        Tải bản đồ từ file với đường dẫn đầy đủ.
         
         Parameters:
-        - filename: Tên file bản đồ để tải
+        - full_filepath: Đường dẫn đầy đủ đến file bản đồ.
         
         Returns:
-        - Map object hoặc None nếu không tìm thấy file
+        - Map object hoặc None nếu không tìm thấy file hoặc lỗi.
         """
         try:
-            from pathlib import Path  # Import pathlib for better path handling
+            # from pathlib import Path # Import không cần thiết ở đây nếu chỉ dùng os.path
             
-            # Handle both direct path and relative path cases
-            if os.path.isabs(filename):
-                map_path = filename
-            else:
-                # Try to load from maps directory
-                map_path = os.path.join('maps', filename)
+            # print(f"DEBUG: Attempting to load map from: {full_filepath}") # Giảm bớt log thừa
                 
-                # If still not found, try more variations
-                if not os.path.exists(map_path):
-                    # Try with and without maps/ prefix
-                    alt_path = filename if filename.startswith('maps/') else os.path.join('maps', filename)
-                    if os.path.exists(alt_path):
-                        map_path = alt_path
+            if not os.path.exists(full_filepath):
+                 print(f"ERROR: Map file not found at specified path: {full_filepath}")
+                 # Check common relative path from CWD if it's not absolute
+                 if not os.path.isabs(full_filepath):
+                     alt_path_from_cwd = Path(full_filepath).resolve()
+                     if alt_path_from_cwd.exists():
+                         print(f"INFO: Found map at resolved CWD relative path: {alt_path_from_cwd}")
+                         full_filepath = str(alt_path_from_cwd)
+                     else:
+                         # Try to see if it was meant to be relative to a 'maps' dir from CWD
+                         # This is a legacy fallback and ideally should not be needed
+                         # if `auto_train_rl.py` correctly constructs full paths.
+                         legacy_path = Path('maps') / full_filepath
+                         if legacy_path.exists():
+                             print(f"WARNING: Map found in legacy 'maps/{full_filepath}'. Consider using full paths.")
+                             full_filepath = str(legacy_path.resolve())
+                         else:
+                             return None # Truly not found
             
-            # Better logging for debugging
-            print(f"Attempting to load map from: {map_path}")
-                
-            with open(map_path, 'r') as f:
+            with open(full_filepath, 'r') as f:
                 data = json.load(f)
             
             map_obj = cls(data['size'])
             map_obj.grid = np.array(data['grid'])
             
-            # Use .get() to handle missing keys and provide default values
-            map_obj.start_pos = data.get('start_pos', None)  # Tương thích với file cũ
-            map_obj.end_pos = data.get('end_pos', None)      # Tương thích với file cũ
+            map_obj.start_pos = data.get('start_pos') 
+            map_obj.end_pos = data.get('end_pos')
+            map_obj.filename = Path(full_filepath).name # Store the filename
             
-            # Print debug info about loaded map
-            print(f"Loaded map with size: {map_obj.size}x{map_obj.size}")
-            print(f"Start position: {map_obj.start_pos}, End position: {map_obj.end_pos}")
+            # print(f"DEBUG: Loaded map '{full_filepath}' with size: {map_obj.size}x{map_obj.size}")
+            # print(f"DEBUG: Start: {map_obj.start_pos}, End: {map_obj.end_pos}")
             
             return map_obj
-        except FileNotFoundError as e:
-            print(f"ERROR: Could not find map file: {filename}")
-            print(f"Looked in: {os.path.abspath('maps')}")
+        except FileNotFoundError: # Should be caught by os.path.exists now mostly
+            print(f"ERROR: FileNotFoundError for map file: {full_filepath}")
+            return None
+        except json.JSONDecodeError as e:
+            print(f"ERROR: Failed to decode JSON from map file: {full_filepath} - {str(e)}")
             return None
         except Exception as e:
-            print(f"ERROR: Failed to load map: {str(e)}")
+            print(f"ERROR: Failed to load map '{full_filepath}': {str(e)}")
+            # import traceback # For more detailed debugging if needed
+            # print(traceback.format_exc())
             return None
 
 class Node:
