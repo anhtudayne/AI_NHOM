@@ -1,0 +1,11 @@
+{
+  "saved_at": "2025-05-13 11:57:42",
+  "total_timesteps": 200000,
+  "env_id": "unknown",
+  "use_double_dqn": true,
+  "use_dueling_network": false,
+  "use_prioritized_replay": false,
+  "learning_rate": 0.0003,
+  "gamma": 0.99,
+  "batch_size": 64
+}
