@@ -30,6 +30,26 @@ class Map:
         if not hasattr(self, 'end_pos'):
             self.end_pos = None
     
+    def is_obstacle(self, x, y):
+        """
+        Kiểm tra xem ô tại vị trí (x, y) có phải là vật cản hay không.
+        
+        Args:
+            x (int): Tọa độ x
+            y (int): Tọa độ y
+            
+        Returns:
+            bool: True nếu là vật cản, False nếu không
+        """
+        from .constants import CellType
+        
+        # Kiểm tra xem vị trí có nằm trong bản đồ không
+        if 0 <= x < self.size and 0 <= y < self.size:
+            return self.grid[y, x] == CellType.OBSTACLE.value
+        
+        # Nếu vị trí nằm ngoài bản đồ, coi như vật cản
+        return True
+    
     def has_path_from_start_to_end(self):
         """
         Kiểm tra có tồn tại đường đi từ start đến end (chỉ đi qua các ô không phải vật cản).
@@ -472,6 +492,34 @@ class Map:
             'gas_stations': np.sum(self.grid == 2),
             'brick_cells': np.sum(self.grid == -1)
         }
+    
+    def get_cell_type(self, position):
+        """
+        Lấy loại ô tại vị trí xác định.
+        
+        Args:
+            position (tuple): Tọa độ (x, y) của ô cần kiểm tra
+            
+        Returns:
+            CellType: Loại ô tại vị trí đó (từ enum CellType)
+        """
+        from .constants import CellType
+        
+        x, y = position
+        if 0 <= x < self.size and 0 <= y < self.size:
+            value = self.grid[y, x]
+            # Ánh xạ giá trị trong grid với enum CellType
+            if value == 0:
+                return CellType.ROAD
+            elif value == 1:
+                return CellType.TOLL
+            elif value == 2:
+                return CellType.GAS
+            elif value == -1:
+                return CellType.OBSTACLE
+        
+        # Ngoài bản đồ hoặc giá trị không xác định - trả về OBSTACLE
+        return CellType.OBSTACLE
     
     def save(self, full_filepath: str):
         """

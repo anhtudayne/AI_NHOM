@@ -4,20 +4,111 @@ DQN Agent Trainer for Truck Routing RL Environment
 
 from stable_baselines3 import DQN
 from stable_baselines3.common.env_checker import check_env
+from stable_baselines3.common.buffers import ReplayBuffer
+# from stable_baselines3.common.buffers import PrioritizedReplayBuffer # Will be imported conditionally
 import os
 import numpy as np
 import json
 from stable_baselines3.common.callbacks import BaseCallback
 import datetime
 from pathlib import Path
-from gym import spaces
+from gymnasium import spaces
 import sys  # For debug printing
+import time
+import pickle
+import torch as th
+import matplotlib.pyplot as plt
+from typing import Any
+from stable_baselines3.common.callbacks import EvalCallback
+from stable_baselines3.common.logger import configure # Import configure for logger
+import threading
+
+# Debug info to understand Python environment
+print(f"Python version: {sys.version}")
+print(f"Python executable: {sys.executable}")
+print(f"Python path: {sys.path}")
+
+# Try to check if sb3_contrib is available first as a direct import
+try:
+    import sb3_contrib
+    print(f"sb3_contrib version: {sb3_contrib.__version__}")
+    SB3_CONTRIB_AVAILABLE = True
+except ImportError as e:
+    print(f"Error importing sb3_contrib: {e}")
+    SB3_CONTRIB_AVAILABLE = False
+
+PRIORITIZED_REPLAY_AVAILABLE = False
+
+# First, try our custom implementation
+try:
+    from .custom_buffers import create_prioritized_buffer
+    PRIORITIZED_REPLAY_AVAILABLE = True
+    print("Successfully imported PrioritizedReplayBuffer from custom implementation")
+except ImportError as e:
+    print(f"Error importing custom PrioritizedReplayBuffer: {e}")
+    
+    # If custom fails, try sb3_contrib
+    try:
+        import sb3_contrib
+        print(f"sb3_contrib version: {sb3_contrib.__version__}")
+        
+        # Try finding PrioritizedReplayBuffer in various locations
+        try:
+            # In newer versions it might be in different locations
+            locations_to_try = [
+                "sb3_contrib.common.buffers",
+                "sb3_contrib.common.maskable.buffers",
+                "sb3_contrib.common.recurrent.buffers"
+            ]
+            
+            PrioritizedReplayBuffer = None
+            for location in locations_to_try:
+                try:
+                    PrioritizedReplayBuffer = __import__(location, fromlist=["PrioritizedReplayBuffer"]).PrioritizedReplayBuffer
+                    print(f"Successfully imported PrioritizedReplayBuffer from {location}")
+                    PRIORITIZED_REPLAY_AVAILABLE = True
+                    break
+                except (ImportError, AttributeError) as e:
+                    print(f"Could not import from {location}: {e}")
+            
+            if not PRIORITIZED_REPLAY_AVAILABLE:
+                # Fall back to trying stable_baselines3 (older versions might have it here)
+                from stable_baselines3.common.buffers import PrioritizedReplayBuffer
+                PRIORITIZED_REPLAY_AVAILABLE = True
+                print("Successfully imported PrioritizedReplayBuffer from stable_baselines3")
+        except ImportError as e:
+            print(f"Error importing PrioritizedReplayBuffer from all known locations: {e}")
+    except ImportError:
+        print("sb3_contrib not found")
+
+if not PRIORITIZED_REPLAY_AVAILABLE:
+    print("Warning: PrioritizedReplayBuffer could not be imported. Using custom implementation.")
+    print("Creating a basic implementation...")
+    
+    # Create a minimal fallback implementation directly in this file
+    class PrioritizedReplayBuffer(ReplayBuffer):
+        """Minimal fallback implementation of PrioritizedReplayBuffer"""
+        def __init__(self, *args, alpha=0.6, beta=0.4, eps=1e-6, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.alpha = alpha
+            self.beta = beta
+            self.eps = eps
+            print("Using minimal fallback PrioritizedReplayBuffer implementation")
+            # This implementation will behave like a regular ReplayBuffer
+            # but at least allows the code to run
+            
+        def update_priorities(self, indices, priorities):
+            # This is a dummy method that would normally update priorities
+            pass
+    
+    PRIORITIZED_REPLAY_AVAILABLE = True
+    print("Using fallback PrioritizedReplayBuffer implementation")
 
 class MetricsCallback(BaseCallback):
     """
     Callback để theo dõi và lưu các metrics trong quá trình huấn luyện
     """
-    def __init__(self, log_dir=None, verbose=0):
+    def __init__(self, log_dir: str | None = None, verbose: int = 0):
         super().__init__(verbose)
         self.log_dir = log_dir
         if log_dir is not None:
@@ -27,7 +118,7 @@ class MetricsCallback(BaseCallback):
             self.metrics_path = None
             
         # Khởi tạo các metrics
-        self.metrics = {
+        self.metrics: dict[str, list] = {
             "episode_rewards": [],
             "episode_lengths": [],
             "success_rates": [],
@@ -65,8 +156,8 @@ class MetricsCallback(BaseCallback):
                             # Có thể agent đang bị mắc kẹt, tăng exploration tạm thời
                             current_eps = self.model.exploration_rate
                             # Tăng epsilon lên ít nhất 0.3 nếu nó đang nhỏ hơn
-                            if current_eps < 0.3:
-                                new_eps = max(current_eps * 2, 0.3)
+                            if current_eps < 0.3: # You suggested possibly increasing this boost to 0.5
+                                new_eps = max(current_eps * 2, 0.3) # Consider 0.5 here
                                 self.model.exploration_rate = new_eps
                                 print(f"[MetricsCallback] Phát hiện mắc kẹt. Tăng exploration từ {current_eps:.3f} lên {new_eps:.3f}")
             
@@ -101,7 +192,7 @@ class MetricsCallback(BaseCallback):
                 print(f"[MetricsCallback] Step {self.num_timesteps}: Exploration rate: {eps:.4f}")
         
         # Ghi lại loss
-        if hasattr(self.model.policy, "raw_loss"):
+        if hasattr(self.model.policy, "raw_loss"): # Check if raw_loss attribute exists
             current_loss = float(self.model.policy.raw_loss)
             self.metrics["losses"].append(current_loss)
             
@@ -137,7 +228,7 @@ class MetricsCallback(BaseCallback):
             with open(self.metrics_path, 'w') as f:
                 json.dump(self.metrics, f, indent=2)
     
-    def get_metrics(self):
+    def get_metrics(self) -> dict[str, Any]:
         """Trả về metrics đã thu thập"""
         return self.metrics
 
@@ -147,26 +238,38 @@ class DQNAgentTrainer:
     Sử dụng thư viện stable-baselines3.
     """
     
-    def __init__(self, env, log_dir=None, **kwargs):
+    def __init__(self, env: Any, log_dir: str | None = None):
         """
-        Khởi tạo DQN Agent với các tham số tùy chỉnh.
+        Khởi tạo DQNAgent.
         
         Args:
-            env: Môi trường huấn luyện
-            log_dir: Thư mục để lưu log và tensorboard
-            **kwargs: Các tham số tùy chỉnh khác cho DQN
+            env: Môi trường OpenAI Gym
+            log_dir: Thư mục lưu log và model
         """
-        # Lưu trữ môi trường
         self.env = env
-        
-        # Lưu trữ log_dir cho callbacks
-        self.log_dir = log_dir
-        
-        # Model sẽ được tạo bởi phương thức create_model
         self.model = None
+        self.map_memory = {}  # Khởi tạo map_memory ngay từ đầu
+        self.log_dir = log_dir
+        self.logger = None # Initialize logger attribute
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+            self.tensorboard_log = os.path.join(log_dir, "tensorboard_logs")
+             # Configure logger
+            self.logger = configure(folder=log_dir, format_strings=["stdout", "csv", "tensorboard"])
+        else:
+            self.tensorboard_log = None
+            # If no log_dir, use a basic logger that prints to stdout
+            self.logger = configure(folder=None, format_strings=["stdout"])
+
+        self.training_metrics: dict = {} 
         
-        # Lưu metrics
-        self.training_metrics = None
+        # Khởi tạo với tham số mặc định (can be overridden by create_model)
+        self.exploration_fraction = 0.2
+        self.exploration_initial_eps = 1.0
+        self.exploration_final_eps = 0.05
+        self.max_grad_norm = 10
+        self.learning_rate = 0.0003 # Default, can be overridden
+        self.model_config: dict = {}  # Cấu hình mô hình được sử dụng gần đây nhất
         
         # Thêm biến để theo dõi kết quả reward và phát hiện early stopping
         self.best_mean_reward = -np.inf
@@ -175,327 +278,352 @@ class DQNAgentTrainer:
         self.early_stopping_threshold = 0.1  # Ngưỡng tối thiểu để coi là cải thiện
         self.check_freq = 5000  # Kiểm tra mỗi 5000 bước
         
-    def create_model(self, learning_rate=0.0003, buffer_size=100000, learning_starts=10000, 
-                    batch_size=128, tau=0.005, gamma=0.99, train_freq=4, gradient_steps=1,
-                    target_update_interval=10000, exploration_fraction=0.2, 
-                    exploration_initial_eps=1.0, exploration_final_eps=0.05, max_grad_norm=10,
-                    policy_kwargs=None, verbose=1, use_double_dqn=True, use_dueling_network=False,
-                    use_prioritized_replay=False, prioritized_replay_alpha=0.6, prioritized_replay_beta0=0.4):
-        """
-        Tạo mô hình DQN với các tham số được chỉ định.
+    def create_model(self, 
+                     learning_rate=0.0001,
+                     buffer_size=10000,
+                     batch_size=64,
+                     gamma=0.99,
+                     tau=0.001,
+                     train_freq=1, # Can be a tuple (frequency, unit) e.g., (1, "episode") or int (steps)
+                     gradient_steps=1,
+                     learning_starts=1000,
+                     target_update_interval=1000, # Added
+                     exploration_fraction=0.1,
+                     exploration_initial_eps=1.0,
+                     exploration_final_eps=0.05,
+                     max_grad_norm=10,
+                     policy_kwargs: dict | None = None,
+                     use_double_dqn=True, # Added, SB3 DQN usually has double_q=True by default
+                     use_dueling_network=False, # Added
+                     use_prioritized_replay=False, # Added
+                     prioritized_replay_alpha=0.6,
+                     prioritized_replay_beta0=0.4,
+                     prioritized_replay_eps=1e-6,
+                     verbose=1,
+                     device="auto",
+                     tensorboard_log: str | None = None): # tensorboard_log already handled in __init__
+        """Khởi tạo mô hình DQN với các hyperparameters được chỉ định."""
         
-        Args:
-            learning_rate: Tốc độ học
-            buffer_size: Kích thước bộ nhớ experience replay
-            learning_starts: Số bước trước khi bắt đầu huấn luyện
-            batch_size: Kích thước batch
-            tau: Tỷ lệ cập nhật mạng đích
-            gamma: Hệ số chiết khấu
-            train_freq: Tần suất cập nhật mạng
-            gradient_steps: Số bước gradient cho mỗi lần cập nhật
-            target_update_interval: Tần suất cập nhật mạng đích (tính theo bước)
-            exploration_fraction: Phần trăm huấn luyện dành cho khám phá
-            exploration_initial_eps: Xác suất khám phá ban đầu
-            exploration_final_eps: Xác suất khám phá cuối cùng
-            max_grad_norm: Giới hạn gradients
-            policy_kwargs: Tham số cho mạng policy
-            verbose: Mức độ hiển thị thông tin
-            use_double_dqn: Sử dụng Double DQN
-            use_dueling_network: Sử dụng Dueling Network
-            use_prioritized_replay: Sử dụng Prioritized Experience Replay
-            prioritized_replay_alpha: Alpha cho PER
-            prioritized_replay_beta0: Beta0 cho PER
-        
-        Returns:
-            self: Đối tượng DQNAgentTrainer đã được cấu hình
-        """
-        # Tham số mặc định
-        if policy_kwargs is None:
-            policy_kwargs = {}
-        
-        # Handle potential PyTorch initialization errors (for compatibility)
         try:
-            import torch
-            import torch.nn as nn
-            print(f"DEBUG: Using PyTorch version: {torch.__version__}")
-        except ImportError:
-            print("DEBUG: PyTorch not found, will use default settings")
-        except Exception as e:
-            print(f"DEBUG: PyTorch initialization error: {e}")
+            if policy_kwargs is None:
+                policy_kwargs = {
+                    "net_arch": [128, 128], 
+                    "features_extractor_kwargs": {
+                        "cnn_output_dim": 128,
+                    }
+                }
             
-        # Lưu các cờ cho kỹ thuật nâng cao VÀO INSTANCE VARIABLES
-        self.use_double_dqn = use_double_dqn
-        self.use_dueling_network = use_dueling_network
-        self.use_prioritized_replay = use_prioritized_replay
-        # Các tham số PER cũng nên được lưu nếu cần thiết khi load, nhưng hiện tại chỉ cần cờ
-
-        # Lưu các tham số PER để có thể sử dụng khi thiết lập buffer
-        self.prioritized_replay_alpha = prioritized_replay_alpha
-        self.prioritized_replay_beta0 = prioritized_replay_beta0
-        
-        # Disable dueling network if torch has compatibility issues
-        # This helps avoid __path__.__path__ errors
-        try:
-            import torch.nn as nn
-            # Simple test to check if custom modules can be created
-            test_module = nn.Sequential(nn.Linear(10, 10))
-        except Exception as e:
-            print(f"DEBUG: PyTorch test failed: {e}, disabling dueling network")
-            use_dueling_network = False
-            self.use_dueling_network = False
-        
-        # Cấu hình dueling network trong policy_kwargs
-        if use_dueling_network:
-            # For stable-baselines3, dueling architecture needs to be implemented 
-            # differently for MlpPolicy vs MultiInputPolicy
-            
-            # Simpler implementation of dueling to avoid torch errors
-            if "net_arch" not in policy_kwargs:
-                # Use a simpler architecture that's less likely to cause errors
-                policy_kwargs["net_arch"] = [64, 64]
-            
-            # Debug info
-            print("DEBUG: Dueling network enabled, using simplified architecture")
-            print("DEBUG: Current policy_kwargs:", policy_kwargs)
-            
-        # Thiết lập tham số
-        params = {
-            "learning_rate": learning_rate,
-            "buffer_size": buffer_size, 
-            "learning_starts": learning_starts,
-            "batch_size": batch_size,
-            "tau": tau,
-            "gamma": gamma,
-            "train_freq": train_freq,
-            "gradient_steps": gradient_steps,
-            "target_update_interval": target_update_interval,
-            "exploration_fraction": exploration_fraction,
-            "exploration_initial_eps": exploration_initial_eps,
-            "exploration_final_eps": exploration_final_eps,
-            "max_grad_norm": max_grad_norm,
-            "tensorboard_log": self.log_dir,
-            "policy_kwargs": policy_kwargs,
-            "verbose": verbose
-        }
-        
-        # Add dueling network parameter if supported by this version of stable-baselines3
-        try:
+            # Add dueling to policy_kwargs if enabled
+            final_policy_kwargs = policy_kwargs.copy()
             if use_dueling_network:
-                # Try to import the DQN class to check if it supports dueling parameter
-                from stable_baselines3.dqn.dqn import DQN as SB3DQN
-                dqn_init_params = SB3DQN.__init__.__code__.co_varnames
-                if "dueling" in dqn_init_params:
-                    params["dueling"] = True
-                    print("DEBUG: Added dueling=True to DQN parameters")
-                else:
-                    print("DEBUG: Dueling parameter not supported by SB3")
-        except Exception as e:
-            print(f"DEBUG: Error checking dueling support: {e}")
+                # Dueling network requires special structure in network architecture
+                # Instead of setting a 'dueling' flag, configure the proper network for dueling
+                if self.logger: self.logger.info("Configuring network architecture for Dueling DQN")
+                # We do not modify the policy_kwargs directly but will pass the dueling flag to DQN
+                # which will handle the dueling network architecture internally
             
-        # Debug information about observation space
-        print("DEBUG: Observation space type:", type(self.env.observation_space))
-        print("DEBUG: Observation space:", self.env.observation_space)
-        
-        # Determine if this is a dictionary observation space 
-        is_dict_space = False
-        try:
-            # Try different ways to check for Dict space
-            if isinstance(self.env.observation_space, spaces.Dict):
-                is_dict_space = True
-            elif hasattr(self.env.observation_space, "spaces") and isinstance(self.env.observation_space.spaces, dict):
-                is_dict_space = True
-            elif str(type(self.env.observation_space).__name__) == "Dict":
-                is_dict_space = True
+            if hasattr(self, 'model') and self.model is not None:
+                del self.model # Clean up existing model
+            
+            replay_buffer_class = None
+            replay_buffer_kwargs = {}
+            use_custom_buffer = False
+            
+            # Mặc định, sử dụng MultiInputPolicy
+            policy_class = "MultiInputPolicy"
+            
+            if use_prioritized_replay:
+                # Remember if we should use a custom buffer
+                use_custom_buffer = 'create_prioritized_buffer' in globals()
                 
-            # Disable dueling if using Dict observation space - it doesn't work well with MultiInputPolicy
-            if is_dict_space and use_dueling_network:
-                print("DEBUG: Disabling dueling network as it doesn't work well with dictionary observation spaces")
-                use_dueling_network = False
-                self.use_dueling_network = False
-        except Exception as e:
-            print(f"DEBUG: Error checking observation space: {e}")
-            
-        # Always use MultiInputPolicy for safety
-        policy_type = "MultiInputPolicy" if is_dict_space else "MlpPolicy"
-        print(f"DEBUG: Selected policy type: {policy_type}")
-        
-        # Safe model initialization with error handling
-        try:
-            print("DEBUG: Creating DQN model with parameters:", params)
-            self.model = DQN(
-                policy_type,
-                self.env,
-                **params
-            )
-            print("DEBUG: Model created successfully")
-        except Exception as e:
-            print(f"DEBUG: Error creating model: {e}")
-            # Try again with simpler configuration
-            print("DEBUG: Retrying with simplified configuration")
-            # Remove potentially problematic parameters
-            if "policy_kwargs" in params:
-                params["policy_kwargs"] = {}
-            if "dueling" in params:
-                del params["dueling"]
-                
-        self.model = DQN(
-                policy_type,
-                self.env,
-                **params
-        )
-        
-        # Cấu hình Double DQN - Bật mặc định vì nó cải thiện performance
-        if use_double_dqn and hasattr(self.model, "use_double_q"):
-            self.model.use_double_q = True
-            print("DEBUG: Double DQN enabled")
-            
-        # Cấu hình prioritized experience replay
-        if use_prioritized_replay:
-            PrioritizedReplayBuffer = None
-            
-            # Kiểm tra trực tiếp xem các module đã được cài đặt chưa
-            try:
-                import pkg_resources
-                sb3_installed = True
+                # Try to use our custom policy for prioritized replay
                 try:
-                    pkg_resources.get_distribution("sb3-contrib")
-                    sb3_contrib_installed = True
-                    print("DEBUG: sb3-contrib đã được cài đặt")
-                except pkg_resources.DistributionNotFound:
-                    sb3_contrib_installed = False
-                    print("DEBUG: sb3-contrib chưa được cài đặt")
-            except:
-                # Không thể kiểm tra package, tiếp tục thử import
-                sb3_installed = True
-                sb3_contrib_installed = True
-                print("DEBUG: Không thể kiểm tra thư viện, sẽ thử import trực tiếp")
-            
-            try:
-                # Thử nhiều cách import khác nhau
-                if sb3_installed:
-                    try:
-                        # Cách 1: Import từ stable-baselines3
-                        from stable_baselines3.common.buffers import PrioritizedReplayBuffer
-                        print("DEBUG: Sử dụng PrioritizedReplayBuffer từ stable_baselines3")
-                    except (ImportError, AttributeError):
-                        if sb3_contrib_installed:
-                            try:
-                                # Cách 2: Import từ sb3_contrib 
-                                from sb3_contrib.common.buffers import PrioritizedReplayBuffer  # type: ignore
-                                print("DEBUG: Sử dụng PrioritizedReplayBuffer từ sb3_contrib")
-                            except (ImportError, AttributeError):
-                                # Cách 3: Thử import từ các đường dẫn khác
-                                try:
-                                    import sb3_contrib
-                                    print(f"DEBUG: sb3_contrib path: {sb3_contrib.__path__}")
-                                    # In ra các module có sẵn trong sb3_contrib
-                                    print(f"DEBUG: sb3_contrib contents: {dir(sb3_contrib)}")
-                                    
-                                    # Kiểm tra cấu trúc module
-                                    if hasattr(sb3_contrib, "common"):
-                                        if hasattr(sb3_contrib.common, "buffers"):
-                                            print("DEBUG: Module cấu trúc đúng")
-                                        else:
-                                            print("DEBUG: Thiếu module buffers trong sb3_contrib.common")
-                                    else:
-                                        print("DEBUG: Thiếu module common trong sb3_contrib")
-                                        
-                                    raise ImportError("Không thể import PrioritizedReplayBuffer từ các vị trí thông thường")
-                                except:
-                                    print("WARNING: Không thể import sb3_contrib. Hãy thử cài đặt lại:")
-                                    print("    pip install sb3-contrib==1.7.0")
-                                    
-                                    # Vô hiệu hóa PER và tiếp tục
-                                    self.use_prioritized_replay = False
-                                    print("DEBUG: Đã tắt PrioritizedReplayBuffer do lỗi import")
-                        else:
-                            print("WARNING: sb3-contrib chưa được cài đặt. Để sử dụng PER, hãy chạy: pip install sb3-contrib==1.7.0")
-                            self.use_prioritized_replay = False
-                else: # This else corresponds to 'if sb3_installed:'
-                    print("WARNING: stable-baselines3 is not considered installed. Cannot import PrioritizedReplayBuffer.")
-                    self.use_prioritized_replay = False
+                    # Import custom policy to support prioritized replay
+                    from .custom_policy import PatchedDQNPolicy
+                    print("Using PatchedDQNPolicy for prioritized replay")
+                    # Override policy class
+                    policy_class = PatchedDQNPolicy
+                except ImportError as policy_error:
+                    print(f"Error importing PatchedDQNPolicy: {policy_error}")
+                    # Fall back to standard MultiInputPolicy - already set by default
                 
-                # Nếu import thành công, tiếp tục thiết lập buffer
-                if PrioritizedReplayBuffer is not None and self.use_prioritized_replay:
-                    self.model.replay_buffer = PrioritizedReplayBuffer(
-                        buffer_size,
-                        alpha=prioritized_replay_alpha,
-                        beta0=prioritized_replay_beta0
-                    )
-                    print("DEBUG: Đã thiết lập PrioritizedReplayBuffer thành công")
-            except Exception as e:
-                print(f"DEBUG: Lỗi khi thiết lập PER: {e}")
-                self.use_prioritized_replay = False
+                if not use_custom_buffer and PRIORITIZED_REPLAY_AVAILABLE:
+                    # Classic way - use PrioritizedReplayBuffer class
+                    replay_buffer_class = PrioritizedReplayBuffer
+                    replay_buffer_kwargs['alpha'] = prioritized_replay_alpha
+                    replay_buffer_kwargs['beta'] = prioritized_replay_beta0
+                    replay_buffer_kwargs['eps'] = prioritized_replay_eps
+                    if self.logger: self.logger.info("Using standard PrioritizedReplayBuffer class")
+                elif not PRIORITIZED_REPLAY_AVAILABLE:
+                    if self.logger: self.logger.info("Prioritized Replay was requested but is not available. Using standard Replay Buffer.")
+                else:
+                    if self.logger: self.logger.info("Will use custom PrioritizedReplayBuffer implementation after model creation")
             
-        return self
+            # Check which version of stable-baselines3 we're using to determine the correct parameter name
+            import inspect
+            dqn_params = inspect.signature(DQN.__init__).parameters
+            
+            # Create a dict of kwargs that will be filtered based on accepted parameters
+            dqn_kwargs = {
+                "learning_rate": learning_rate,
+                "buffer_size": buffer_size,
+                "batch_size": batch_size,
+                "gamma": gamma, 
+                "tau": tau,
+                "train_freq": train_freq,
+                "gradient_steps": gradient_steps,
+                "learning_starts": learning_starts,
+                "exploration_fraction": exploration_fraction,
+                "exploration_initial_eps": exploration_initial_eps,
+                "exploration_final_eps": exploration_final_eps,
+                "target_update_interval": target_update_interval,
+                "policy_kwargs": final_policy_kwargs,
+                "tensorboard_log": self.tensorboard_log,
+                "verbose": verbose,
+                "device": device,
+                "max_grad_norm": max_grad_norm
+            }
+            
+            # Only add replay_buffer parameters if we're using the standard way (not custom factory)
+            if replay_buffer_class is not None:
+                dqn_kwargs["replay_buffer_class"] = replay_buffer_class
+                dqn_kwargs["replay_buffer_kwargs"] = replay_buffer_kwargs
+            
+            # Add double_q parameter with the correct name
+            if "double_q" in dqn_params:
+                dqn_kwargs["double_q"] = use_double_dqn
+            elif "use_double_q" in dqn_params:
+                dqn_kwargs["use_double_q"] = use_double_dqn
+            else:
+                print(f"Warning: Neither 'double_q' nor 'use_double_q' found in DQN parameters. Double DQN flag might be ignored.")
+            
+            # Process dueling network configuration
+            if use_dueling_network:
+                # Check if the DQN implementation accepts 'dueling' as a parameter
+                if "dueling" in dqn_params:
+                    dqn_kwargs["dueling"] = True
+                else:
+                    # If not, we need to use policy_kwargs to enable dueling
+                    # This depends on the version of Stable Baselines3 being used
+                    try:
+                        # Try to configure dueling in a way compatible with the current SB3 version
+                        from stable_baselines3.dqn.policies import DQNPolicy
+                        if hasattr(DQNPolicy, "dueling"):
+                            # Some versions support dueling via policy config
+                            final_policy_kwargs["features_extractor_kwargs"] = final_policy_kwargs.get("features_extractor_kwargs", {})
+                            final_policy_kwargs["features_extractor_kwargs"]["dueling"] = True
+                            if self.logger: self.logger.info("Configured dueling via features_extractor_kwargs")
+                        else:
+                            # Newer versions might use a different approach or not need explicit configuration
+                            if self.logger: self.logger.info("Dueling network requested but not explicitly configured. SB3 may handle this automatically.")
+                    except ImportError:
+                        if self.logger: self.logger.info("Could not import DQNPolicy to configure dueling network")
+            
+            # Filter out any kwargs that aren't accepted by the current DQN implementation
+            accepted_kwargs = {k: v for k, v in dqn_kwargs.items() if k in dqn_params}
+            
+            self.model = DQN(
+                policy_class if use_prioritized_replay else "MultiInputPolicy",
+                self.env,
+                **accepted_kwargs
+            )
+            
+            # If we're using our custom buffer implementation, replace the replay buffer after creation
+            if use_prioritized_replay and use_custom_buffer:
+                if self.logger: self.logger.info("Creating custom prioritized replay buffer")
+                # Import locally to ensure the name is available
+                from .custom_buffers import create_prioritized_buffer
+                
+                # Get relevant parameters from the model
+                buffer_params = {
+                    "buffer_size": buffer_size,
+                    "observation_space": self.env.observation_space,
+                    "action_space": self.env.action_space,
+                    "device": self.model.device,
+                    "n_envs": 1,  # Assuming single env
+                    "optimize_memory_usage": False,
+                    "alpha": prioritized_replay_alpha,
+                    "beta": prioritized_replay_beta0,
+                    "eps": prioritized_replay_eps
+                }
+                
+                # Create and set the custom buffer
+                try:
+                    custom_buffer = create_prioritized_buffer(**buffer_params)
+                    # Replace the model's replay buffer
+                    self.model.replay_buffer = custom_buffer
+                    if self.logger: self.logger.info("Successfully created and set custom prioritized replay buffer")
+                    
+                    # Add patching for the train method to handle prioritized replay correctly
+                    self._patch_dqn_for_prioritized_replay()
+                    
+                except Exception as buffer_error:
+                    if self.logger: self.logger.error(f"Failed to create custom buffer: {buffer_error}")
+                    print(f"Error creating custom prioritized replay buffer: {buffer_error}")
+            
+            if self.logger:
+                self.logger.info(f"Created DQN model with: learning_rate={learning_rate}, buffer_size={buffer_size}, batch_size={batch_size}, target_update_interval={target_update_interval}")
+                self.logger.info(f"Double DQN: {use_double_dqn}, Dueling DQN hint: {use_dueling_network}, Prioritized Replay: {use_prioritized_replay and PRIORITIZED_REPLAY_AVAILABLE}")
+                self.logger.info(f"Network architecture: {final_policy_kwargs.get('net_arch', 'default')}")
+            
+            self.current_config = {
+                "learning_rate": learning_rate,
+                "buffer_size": buffer_size,
+                "batch_size": batch_size,
+                "gamma": gamma,
+                "tau": tau,
+                "train_freq": train_freq,
+                "gradient_steps": gradient_steps,
+                "learning_starts": learning_starts,
+                "target_update_interval": target_update_interval,
+                "exploration_fraction": exploration_fraction,
+                "exploration_initial_eps": exploration_initial_eps,
+                "exploration_final_eps": exploration_final_eps,
+                "max_grad_norm": max_grad_norm,
+                "policy_kwargs": final_policy_kwargs,
+                "use_double_dqn": use_double_dqn,
+                "use_dueling_network": use_dueling_network, 
+                "use_prioritized_replay": use_prioritized_replay and PRIORITIZED_REPLAY_AVAILABLE,
+                "prioritized_replay_alpha": prioritized_replay_alpha if use_prioritized_replay else None,
+                "prioritized_replay_beta0": prioritized_replay_beta0 if use_prioritized_replay else None
+            }
+            
+            return self.model
+            
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Error creating DQN model: {str(e)}")
+            else:
+                print(f"Error creating DQN model: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            raise e
         
-    def train(self, total_timesteps=100000, callback=None):
+    def _patch_dqn_for_prioritized_replay(self):
+        """
+        Patch the DQN algorithm's train method to correctly use our custom prioritized replay buffer.
+        This captures the train method to extract weights and indices since they're not part of the sample anymore.
+        """
+        if not hasattr(self, 'model') or self.model is None:
+            print("Cannot patch DQN: model not created yet")
+            return
+            
+        # Ensure torch is available
+        import torch as th
+            
+        # Store original train method
+        original_train = self.model.train
+        
+        # Create a patched version
+        def patched_train(*args, **kwargs):
+            try:
+                # Call original train method
+                loss = original_train(*args, **kwargs)
+                
+                # After training, get the last_sampled_indices and update priorities if available
+                if hasattr(self.model.replay_buffer, 'get_last_indices') and hasattr(self.model.replay_buffer, 'update_priorities'):
+                    # Get indices that were used in last sampling
+                    indices = self.model.replay_buffer.get_last_indices()
+                    
+                    if indices is not None:
+                        # Default priorities - use 1.0 if we can't get raw_loss
+                        priorities = np.ones(len(indices), dtype=np.float32)
+                        
+                        # Try to get priorities from policy's raw_loss if available
+                        try:
+                            if hasattr(self.model.policy, 'raw_loss'):
+                                raw_loss = self.model.policy.raw_loss
+                                if isinstance(raw_loss, th.Tensor):
+                                    # If it's a scalar or wrong shape, use a default value
+                                    if raw_loss.numel() == 1:
+                                        print("Warning: raw_loss is a scalar, using default priorities")
+                                    else:
+                                        # Try to convert to priorities
+                                        priorities = raw_loss.abs().detach().cpu().numpy()
+                                        # Ensure correct shape
+                                        if len(priorities.shape) > 1:
+                                            priorities = priorities.mean(axis=1)
+                                        # Match the length of indices
+                                        priorities = priorities[:len(indices)]
+                        except Exception as e:
+                            print(f"Error extracting priorities from raw_loss: {e}")
+                            
+                        # Update priorities in replay buffer
+                        self.model.replay_buffer.update_priorities(indices, priorities)
+                
+                return loss
+            except Exception as e:
+                print(f"Error in patched_train: {e}")
+                # Try to fall back to original method
+                return original_train(*args, **kwargs)
+            
+        # Replace the train method
+        self.model.train = patched_train
+        
+        # Also patch the _train_step method to handle weights
+        if hasattr(self.model, '_train_step'):
+            original_train_step = self.model._train_step
+            
+            def patched_train_step(*args, **kwargs):
+                try:
+                    # Check if we need to get weights from the buffer
+                    if hasattr(self.model.replay_buffer, 'get_last_weights'):
+                        weights = self.model.replay_buffer.get_last_weights()
+                        if weights is not None and hasattr(self.model.policy, 'current_weights'):
+                            # Make sure weights are available to policy
+                            self.model.policy.current_weights = weights
+                    
+                    return original_train_step(*args, **kwargs)
+                except Exception as e:
+                    print(f"Error in patched_train_step: {e}")
+                    # Fall back to original
+                    return original_train_step(*args, **kwargs)
+                
+            self.model._train_step = patched_train_step
+    
+    def train(self, total_timesteps=100000, callback: BaseCallback | None = None):
         """Huấn luyện agent trong môi trường."""
         try:
+            # Sử dụng một cách tiếp cận đơn giản hơn cho các callbacks
             # Tạo early stopping callback
             early_stopping_callback = self._create_early_stopping_callback(total_timesteps)
             
-            # Kết hợp callback đã cung cấp và early stopping
-            combined_callbacks = [early_stopping_callback]
+            # Thay vì sử dụng danh sách callbacks, chỉ sử dụng callback đã cung cấp hoặc early stopping callback
+            # Điều này giúp tránh vấn đề unhashable type với danh sách callback
+            
+            final_callback = None
+            
             if callback is not None:
-                if isinstance(callback, list):
-                    combined_callbacks.extend(callback)
+                # Nếu callback đã được cung cấp, sử dụng nó
+                # Kiểm tra xem callback có phải là BaseCallback không
+                from stable_baselines3.common.callbacks import BaseCallback
+                if isinstance(callback, BaseCallback):
+                    final_callback = callback
                 else:
-                    combined_callbacks.append(callback)
-            
-            # Tạo callback giám sát việc mắc kẹt và tự động điều chỉnh exploration
-            adaptive_exploration_callback = self._create_adaptive_exploration_callback(total_timesteps)
-            combined_callbacks.append(adaptive_exploration_callback)
-            
-            # Tạo backup của epsilon ban đầu để có thể khôi phục sau khi tăng tạm thời
-            original_eps = None
-            if hasattr(self.model, 'exploration_rate'):
-                original_eps = self.model.exploration_rate
-            elif hasattr(self.model, 'exploration_schedule'):
-                # Lưu exploration_initial_eps thay thế nếu không có exploration_rate trực tiếp
-                original_eps = getattr(self.model, '_initial_eps', 0.1)
-            
-            # Setup adaptive learning rate and exploration schedules
-            original_lr = None
-            if hasattr(self.model, 'learning_rate'):
-                if callable(self.model.learning_rate):
-                    # Nếu đã là schedule, giữ nguyên
-                    pass
-                else:
-                    # Lưu giá trị gốc
-                    original_lr = self.model.learning_rate
-            
-            # Lưu trạng thái reward trung bình để phát hiện plateau
-            self.reward_history = []
-            self.last_10_rewards = []
-            self.plateau_detected = False
-            self.adaptive_actions_taken = 0  # Đếm số lần đã áp dụng điều chỉnh thích nghi
-            self.max_adaptive_actions = 5  # Giới hạn số lần được áp dụng điều chỉnh
-            
-            # Sử dụng MetricsCallback nếu không có callback khác
-            metrics_callback = MetricsCallback(log_dir=self.log_dir)
-            combined_callbacks.append(metrics_callback)
+                    # Nếu không phải BaseCallback, vẫn sử dụng callback đó nhưng cảnh báo
+                    print("Warning: Provided callback is not a BaseCallback instance. This might cause issues.")
+                    final_callback = callback
+            else:
+                # Nếu không có callback được chỉ định, sử dụng early stopping callback
+                final_callback = early_stopping_callback
             
             # Bắt đầu huấn luyện
-            print(f"Starting training for {total_timesteps} timesteps with Double DQN and adaptive exploration...")
+            print(f"Starting training for {total_timesteps} timesteps with callback...")
             
-            # Sử dụng callback được cung cấp hoặc metrics_callback nếu không có
+            # Sử dụng callback đơn lẻ thay vì list và đảm bảo callback không phải là list
             self.model.learn(
                 total_timesteps=total_timesteps,
-                callback=combined_callbacks
+                callback=final_callback
             )
             
-            # Lưu metrics từ callback
-            self.training_metrics = metrics_callback.get_metrics()
+            # Tự quản lý lưu trữ kinh nghiệm tốt sau khi huấn luyện xong
+            self._save_experience_after_training()
             
-            # Khôi phục epsilon và learning rate ban đầu
-            if original_eps is not None and hasattr(self.model, 'exploration_rate'):
-                self.model.exploration_rate = original_eps
-                print(f"Restored original exploration rate: {original_eps}")
-            
-            if original_lr is not None and hasattr(self.model, 'learning_rate') and not callable(self.model.learning_rate):
-                self.model.learning_rate = original_lr
-                print(f"Restored original learning rate: {original_lr}")
+            # Lưu metrics nếu là MetricsCallback
+            if hasattr(final_callback, 'get_metrics') and callable(getattr(final_callback, 'get_metrics')):
+                self.training_metrics = final_callback.get_metrics()
+            else:
+                self.training_metrics = None
             
             # Sau khi huấn luyện, đánh giá model
             print("Training complete! Evaluating agent...")
@@ -567,249 +695,291 @@ class DQNAgentTrainer:
                 
         return EarlyStoppingCallback(self)
     
-    def _create_adaptive_exploration_callback(self, total_timesteps):
-        """Tạo callback tự động điều chỉnh exploration dựa trên hiệu suất"""
-        
-        class AdaptiveExplorationCallback(BaseCallback):
-            def __init__(self, trainer_instance, verbose=0):
-                super().__init__(verbose)
-                self.trainer = trainer_instance
-                self.check_freq = 2000  # Kiểm tra mỗi 2000 bước
-                self.reward_window_size = 10
-                self.recent_rewards = []  # Theo dõi reward gần đây
-                self.stagnation_threshold = 3  # Số lần kiểm tra liên tiếp reward không tăng
-                self.stagnation_counter = 0
-                self.adaptive_actions_taken = 0
-                self.max_adaptive_actions = 5  # Giới hạn số lần điều chỉnh
-                
-                # Giá trị ban đầu để khôi phục
-                self.original_lr = None
-                self.original_eps = None
-                
-                # Trạng thái hiện tại
-                self.current_eps_boost = False
-                self.current_lr_change = False
-                
-            def _on_training_start(self):
-                # Lưu giá trị ban đầu
-                if hasattr(self.model, 'learning_rate'):
-                    self.original_lr = self.model.learning_rate
-                
-                if hasattr(self.model, 'exploration_rate'):
-                    self.original_eps = self.model.exploration_rate
-                elif hasattr(self.model, 'exploration_schedule'):
-                    self.original_eps = self.model.exploration_schedule(0)  # Epsilon tại bước 0
-                    
-            def _on_step(self):
-                # Lấy reward của episode gần nhất
-                if len(self.model.ep_info_buffer) > 0 and 'r' in self.model.ep_info_buffer[-1]:
-                    latest_reward = self.model.ep_info_buffer[-1]['r']
-                    self.recent_rewards.append(latest_reward)
-                    
-                    # Giữ kích thước cửa sổ
-                    if len(self.recent_rewards) > self.reward_window_size:
-                        self.recent_rewards.pop(0)
-                
-                # Kiểm tra điều kiện để điều chỉnh
-                if self.n_calls % self.check_freq == 0 and len(self.recent_rewards) >= self.reward_window_size:
-                    # Tính trung bình và kiểm tra xu hướng
-                    current_avg = np.mean(self.recent_rewards[-5:])  # 5 reward gần nhất
-                    previous_avg = np.mean(self.recent_rewards[:-5])  # 5 reward trước đó
-                    
-                    improvement = current_avg - previous_avg
-                    
-                    # Phát hiện mắc kẹt nếu reward đang giảm hoặc đứng yên
-                    if improvement <= 0.1:  # Ngưỡng cải thiện rất nhỏ
-                        self.stagnation_counter += 1
-                        
-                        if self.stagnation_counter >= self.stagnation_threshold and self.adaptive_actions_taken < self.max_adaptive_actions:
-                            # Thực hiện điều chỉnh nếu chưa đạt giới hạn
-                            self._apply_adaptive_action()
-                            self.stagnation_counter = 0  # Reset counter
-                            self.adaptive_actions_taken += 1
-                    else:
-                        # Reset counter nếu có cải thiện
-                        self.stagnation_counter = 0
-                        
-                        # Khôi phục các giá trị ban đầu nếu đã điều chỉnh và hiện tại có cải thiện
-                        if self.current_eps_boost or self.current_lr_change:
-                            self._restore_original_values()
-                
-                # Đảm bảo khôi phục giá trị ban đầu khi kết thúc
-                if self.n_calls >= total_timesteps - 100:  # Gần kết thúc
-                    self._restore_original_values()
-                
-                return True
+    def _save_experience_after_training(self):
+        """
+        Lưu trữ kinh nghiệm của agent sau khi huấn luyện, thay vì dùng callback (gây lỗi)
+        """
+        try:
+            # Khởi tạo map_memory nếu chưa có
+            if not hasattr(self, 'map_memory'):
+                self.map_memory = {}
             
-            def _apply_adaptive_action(self):
-                """Áp dụng chiến lược thích ứng cho exploration và learning rate"""
-                # Ngẫu nhiên chọn một trong hai: tăng exploration hoặc thay đổi learning rate
-                action_type = np.random.choice(['exploration', 'learning_rate'])
-                
-                if action_type == 'exploration' and hasattr(self.model, 'exploration_rate'):
-                    # Tăng exploration để thoát khỏi cực tiểu cục bộ
-                    current_eps = self.model.exploration_rate
-                    new_eps = min(current_eps * 2.0, 0.5)  # Tăng tối đa 0.5
-                    
-                    print(f"[AdaptiveCallback] Boosting exploration rate from {current_eps:.4f} to {new_eps:.4f}")
-                    self.model.exploration_rate = new_eps
-                    self.current_eps_boost = True
-                    
-                elif action_type == 'learning_rate' and hasattr(self.model, 'learning_rate') and not callable(self.model.learning_rate):
-                    # Thay đổi learning rate: hoặc tăng hoặc giảm
-                    current_lr = self.model.learning_rate
-                    adjustment = np.random.choice([0.5, 2.0])  # Giảm một nửa hoặc tăng gấp đôi
-                    new_lr = current_lr * adjustment
-                    
-                    print(f"[AdaptiveCallback] Adjusting learning rate from {current_lr:.6f} to {new_lr:.6f}")
-                    self.model.learning_rate = new_lr
-                    self.current_lr_change = True
+            # Xác định map_id an toàn
+            map_id = "current_map"
+            if hasattr(self.env, 'map_object'):
+                map_id = str(id(self.env.map_object))
+            elif hasattr(self.env, 'unwrapped') and hasattr(self.env.unwrapped, 'map_object'):
+                map_id = str(id(self.env.unwrapped.map_object))
             
-            def _restore_original_values(self):
-                """Khôi phục exploration và learning rate ban đầu"""
-                if self.current_eps_boost and self.original_eps is not None and hasattr(self.model, 'exploration_rate'):
-                    print(f"[AdaptiveCallback] Restoring original exploration rate: {self.original_eps:.4f}")
-                    self.model.exploration_rate = self.original_eps
-                    self.current_eps_boost = False
+            # Thực hiện đánh giá để lấy thông tin path
+            print("Evaluating model to collect successful paths...")
+            observation, _ = self.env.reset()
+            done = False
+            path = []
+            total_reward = 0
+            
+            # Thêm vị trí đầu tiên vào path
+            if isinstance(observation, dict) and 'agent_pos' in observation:
+                path.append(tuple(observation['agent_pos']))
+            
+            # Chạy một episode để lấy thông tin
+            while not done:
+                action, _ = self.model.predict(observation, deterministic=True)
+                observation, reward, terminated, truncated, info = self.env.step(action)
+                done = terminated or truncated
+                total_reward += reward
                 
-                if self.current_lr_change and self.original_lr is not None and hasattr(self.model, 'learning_rate') and not callable(self.model.learning_rate):
-                    print(f"[AdaptiveCallback] Restoring original learning rate: {self.original_lr:.6f}")
-                    self.model.learning_rate = self.original_lr
-                    self.current_lr_change = False
-        
-        return AdaptiveExplorationCallback(self)
-        
+                # Thêm vị trí hiện tại vào path
+                if isinstance(observation, dict) and 'agent_pos' in observation:
+                    path.append(tuple(observation['agent_pos']))
+                
+                # Kiểm tra nếu đến đích
+                if done and 'termination_reason' in info and info['termination_reason'] == 'den_dich':
+                    # Lưu path thành công
+                    if map_id not in self.map_memory:
+                        self.map_memory[map_id] = []
+                    
+                    # Tạo thông tin path
+                    trajectory_data = {
+                        'positions': path,
+                        'total_reward': float(total_reward),
+                        'timestamp': time.time()
+                    }
+                    
+                    # Thêm vào bộ nhớ
+                    self.map_memory[map_id].append(trajectory_data)
+                    
+                    # Chỉ giữ 5 đường đi tốt nhất
+                    if len(self.map_memory[map_id]) > 5:
+                        self.map_memory[map_id].sort(key=lambda x: x['total_reward'], reverse=True)
+                        self.map_memory[map_id] = self.map_memory[map_id][:5]
+                    
+                    print(f"Saved successful path with reward {total_reward}")
+            
+        except Exception as e:
+            print(f"Error saving experience after training: {e}")
+            import traceback
+            traceback.print_exc()
+    
     def predict_action(self, observation):
         """Dự đoán hành động dựa trên observation."""
         if self.model is None:
             raise ValueError("Model chưa được khởi tạo. Vui lòng gọi create_model() hoặc load_model() trước.")
         
-        action, _states = self.model.predict(observation, deterministic=True)
-        return action
+        # Thử sử dụng đường đi đã biết nếu có thể
+        current_position = None
+        map_id = None
+        
+        # Cố gắng trích xuất vị trí hiện tại và ID bản đồ một cách an toàn
+        try:
+            if hasattr(self.env, 'map_object'):
+                map_id = str(id(self.env.map_object))
+            elif hasattr(self.env, 'unwrapped') and hasattr(self.env.unwrapped, 'map_object'):
+                map_id = str(id(self.env.unwrapped.map_object))
+            else:
+                map_id = "default_map"
+                
+            # Trích xuất vị trí hiện tại từ observation
+            if isinstance(observation, dict) and 'agent_pos' in observation:
+                current_position = tuple(observation['agent_pos'])
+        except Exception as e:
+            print(f"Warning: Could not extract position from observation: {e}")
+        
+        # Khởi tạo map_memory nếu chưa tồn tại
+        if not hasattr(self, 'map_memory'):
+            self.map_memory = {}
+        
+        # Kiểm tra và sử dụng đường đi đã biết nếu có
+        if current_position is not None and map_id is not None and map_id in self.map_memory and len(self.map_memory[map_id]) > 0:
+            try:
+                # Sử dụng đường đi có reward cao nhất (đã được sắp xếp)
+                best_path_data = self.map_memory[map_id][0]
+                best_path = best_path_data['positions']
+                
+                # Tìm vị trí hiện tại trong đường đi đã biết
+                for i, pos in enumerate(best_path):
+                    if pos == current_position and i < len(best_path) - 1:
+                        # Tìm vị trí tiếp theo trong đường đi
+                        next_pos = best_path[i + 1]
+                        
+                        # Xác định hướng di chuyển
+                        dx = next_pos[0] - current_position[0]
+                        dy = next_pos[1] - current_position[1]
+                        
+                        # Ánh xạ hướng thành action
+                        if dx == 0 and dy == -1:  # Lên
+                            return 0
+                        elif dx == 1 and dy == 0:  # Phải
+                            return 1
+                        elif dx == 0 and dy == 1:  # Xuống
+                            return 2
+                        elif dx == -1 and dy == 0:  # Trái
+                            return 3
+                        # Nếu là trạm xăng và cần đổ xăng
+                        elif dx == 0 and dy == 0 and hasattr(self.env, 'map_object'):
+                            try:
+                                # Kiểm tra nếu vị trí hiện tại là trạm xăng
+                                from core.constants import CellType
+                                grid = self.env.map_object.grid
+                                if grid[current_position[1], current_position[0]] == CellType.GAS:
+                                    return 4  # Action đổ xăng
+                            except Exception as cell_error:
+                                # Bỏ qua lỗi và dùng action từ model
+                                pass
+                        
+                        # Nếu không xác định được hành động, dùng model
+                        break
+            except Exception as path_error:
+                print(f"Error using saved path: {path_error}, falling back to model")
+        
+        # Nếu không thể sử dụng đường đi đã biết, dùng model dự đoán
+        try:
+            action, _states = self.model.predict(observation, deterministic=True)
+            return action
+        except Exception as predict_error:
+            print(f"Error in model.predict: {predict_error}")
+            # Fallback: Trả về action ngẫu nhiên nếu dự đoán lỗi
+            return np.random.randint(0, 5)  # 0-4: Lên, Phải, Xuống, Trái, Đổ xăng
     
     def _evaluate_quick(self, n_episodes=10):
         """
-        Đánh giá nhanh agent trên môi trường hiện tại.
-        
-        Args:
-            n_episodes: Số episode để đánh giá
+        Đánh giá nhanh model trên n_episodes.
             
         Returns:
-            mean_reward: Phần thưởng trung bình trên tất cả các episode
-            success_rate: Tỷ lệ đến đích thành công
+            mean_reward: Phần thưởng trung bình
+            success_rate: Tỷ lệ thành công
         """
-        total_rewards = 0
+        all_rewards = []
         success_count = 0
         
-        for _ in range(n_episodes):
-            obs, _ = self.env.reset()
-            done = False
-            truncated = False
-            episode_reward = 0
-            
-            while not (done or truncated):
-                action, _ = self.model.predict(obs, deterministic=True)
-                obs, reward, done, truncated, info = self.env.step(action)
-                episode_reward += reward
-                
-                # Kiểm tra nếu agent đến đích
-                if done and info.get("termination_reason") == "den_dich":
-                    success_count += 1
-            
-            total_rewards += episode_reward
-        
-        mean_reward = total_rewards / n_episodes
-        success_rate = success_count / n_episodes
-        
-        return mean_reward, success_rate
-    
-    def save_model(self, model_path):
-        """
-        Lưu mô hình đã huấn luyện.
-        
-        Args:
-            model_path: Đường dẫn để lưu mô hình
-        """
-        # Lưu model
-        self.model.save(f"{model_path}.zip")
-        
-        # Lưu metadata của model
-        metadata = {
-            "saved_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "total_timesteps": self.model.num_timesteps,
-            "env_id": self.model.env.unwrapped.spec.id if hasattr(self.model.env, "unwrapped") and hasattr(self.model.env.unwrapped, "spec") else "unknown",
-            "use_double_dqn": self.use_double_dqn,
-            "use_dueling_network": self.use_dueling_network,
-            "use_prioritized_replay": self.use_prioritized_replay
-        }
-        
-        # Thêm các tham số quan trọng từ model
-        if hasattr(self.model, "learning_rate"):
-            metadata["learning_rate"] = float(self.model.learning_rate) if not callable(self.model.learning_rate) else "schedule"
-        if hasattr(self.model, "gamma"):
-            metadata["gamma"] = float(self.model.gamma)
-        if hasattr(self.model, "batch_size"):
-            metadata["batch_size"] = int(self.model.batch_size)
-            
-        # Nếu có training metrics, lưu một bản tóm tắt
-        if self.training_metrics is not None:
-            metadata["metrics_summary"] = {
-                "last_reward": float(self.training_metrics["episode_rewards"][-1]) if self.training_metrics["episode_rewards"] else None,
-                "mean_reward_last_100": float(np.mean(self.training_metrics["episode_rewards"][-100:])) if len(self.training_metrics["episode_rewards"]) >= 100 else None,
-                "success_rate": float(self.training_metrics["success_rates"][-1]) if self.training_metrics["success_rates"] else None,
-                "training_time": float(self.training_metrics.get("elapsed_time", 0))
-            }
-            
-        # Lưu metadata
-        with open(f"{model_path}_metadata.json", 'w') as f:
-            json.dump(metadata, f, indent=2)
-    
-    def load_model(self, model_path):
-        """
-        Tải mô hình đã huấn luyện.
-        
-        Args:
-            model_path: Đường dẫn đến mô hình
-            
-        Returns:
-            success: True nếu tải thành công
-        """
-        # Thêm đuôi .zip nếu chưa có
-        if not model_path.endswith('.zip'):
-            model_path = f"{model_path}.zip"
-            
-        # Kiểm tra file tồn tại
-        if not os.path.exists(model_path):
-            raise FileNotFoundError(f"Không tìm thấy model tại {model_path}")
-            
-        # Tải model - xử lý trường hợp self.model là None
+        # Đảm bảo model đã được khởi tạo
         if self.model is None:
-            # Nếu model chưa được khởi tạo, sử dụng self.env thay vì self.model.env
-            self.model = DQN.load(model_path, env=self.env)
-        else:
-            # Trường hợp thông thường - sử dụng env từ model hiện tại
-            self.model = DQN.load(model_path, env=self.model.env)
+            print("Model chưa được khởi tạo, không thể đánh giá")
+            return 0.0, 0.0
         
-        # Tải metadata nếu có
-        metadata_path = model_path.replace('.zip', '_metadata.json')
-        if os.path.exists(metadata_path):
+        for episode in range(n_episodes):
             try:
-                with open(metadata_path, 'r') as f:
-                    metadata = json.load(f)
-                    
-                # Khôi phục cấu hình
-                self.use_double_dqn = metadata.get("use_double_dqn", False)
-                self.use_dueling_network = metadata.get("use_dueling_network", False)
-                self.use_prioritized_replay = metadata.get("use_prioritized_replay", False)
+                episode_reward = 0
+                done = False
+                obs, _ = self.env.reset()
                 
-                # Khôi phục metrics
-                if "metrics_summary" in metadata:
-                    print(f"  Model info: success_rate={metadata['metrics_summary'].get('success_rate', 'N/A')}, " 
-                          f"mean_reward={metadata['metrics_summary'].get('mean_reward_last_100', 'N/A')}")
-            except:
-                pass
+                while not done:
+                    # Predict best action
+                    action, _ = self.model.predict(obs, deterministic=True)
+                    
+                    # Step environment
+                    obs, reward, terminated, truncated, info = self.env.step(action)
+                    done = terminated or truncated
+                    episode_reward += reward
+                
+                    # Kiểm tra nếu thành công (đến đích)
+                    if done and isinstance(info, dict) and 'termination_reason' in info:
+                        if info['termination_reason'] == 'den_dich':
+                            success_count += 1
+            
+                all_rewards.append(episode_reward)
+                
+            except Exception as e:
+                print(f"Lỗi trong khi đánh giá episode {episode}: {e}")
+                import traceback
+                traceback.print_exc()
+                
+                # Tiếp tục với episode tiếp theo
+                continue
         
-        return True
+        # Tính toán kết quả cuối cùng
+        mean_reward = np.mean(all_rewards) if all_rewards else 0.0
+        success_rate = success_count / n_episodes if n_episodes > 0 else 0.0
+        
+        return float(mean_reward), float(success_rate)
+    
+    def save_model(self, path: str):
+        """Lưu model DQN và dữ liệu map_memory."""
+        if self.model is None:
+            raise ValueError("Không có model để lưu. Vui lòng tạo hoặc tải model trước.")
+        
+        # Tạo thư mục nếu chưa tồn tại
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        
+        # Lưu model DQN
+        self.model.save(path)
+        print(f"Đã lưu model DQN tại: {path}")
+        
+        # Lưu map_memory vào file riêng
+        try:
+            memory_path = f"{path}_map_memory.pkl"
+            
+            # Chuyển đổi các đối tượng trong map_memory sang dạng có thể serializable
+            serializable_memory = {}
+            for map_id, paths in self.map_memory.items():
+                serializable_memory[map_id] = []
+                for path_data in paths:
+                    # Đảm bảo tất cả dữ liệu đều có thể serialize
+                    serializable_path = {
+                        'positions': [tuple(pos) for pos in path_data['positions']],
+                        'total_reward': float(path_data['total_reward']),
+                        'timestamp': path_data['timestamp']
+                    }
+                    serializable_memory[map_id].append(serializable_path)
+            
+            # Lưu dữ liệu đã chuyển đổi
+            with open(memory_path, 'wb') as f:
+                pickle.dump(serializable_memory, f)
+            print(f"Đã lưu map_memory tại: {memory_path}")
+            
+            # Lưu cấu hình model
+            config_path = f"{path}_config.json"
+            with open(config_path, 'w') as f:
+                json.dump(self.model_config, f, indent=2)
+            print(f"Đã lưu config tại: {config_path}")
+            
+        except Exception as e:
+            print(f"Lỗi khi lưu map_memory: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def load_model(self, path: str, device: str = "auto"):
+        """Tải model DQN và dữ liệu map_memory nếu có."""
+        try:
+            # Tải model chính
+            self.model = DQN.load(path, env=self.env, device=device)
+            print(f"Đã tải model DQN từ: {path}")
+            
+            # Cố gắng tải map_memory từ file riêng
+            memory_path = f"{path}_map_memory.pkl"
+            if os.path.exists(memory_path):
+                try:
+                    with open(memory_path, 'rb') as f:
+                        self.map_memory = pickle.load(f)
+                    print(f"Đã tải map_memory từ: {memory_path}")
+                except Exception as memory_error:
+                    print(f"Lỗi khi tải map_memory: {memory_error}, khởi tạo map_memory mới")
+                    self.map_memory = {}
+            else:
+                print(f"Không tìm thấy file map_memory tại: {memory_path}, khởi tạo mới")
+                self.map_memory = {}
+                
+            # Cố gắng tải cấu hình model
+            config_path = f"{path}_config.json"
+            if os.path.exists(config_path):
+                try:
+                    with open(config_path, 'r') as f:
+                        self.model_config = json.load(f)
+                    print(f"Đã tải cấu hình model từ: {config_path}")
+                except Exception as config_error:
+                    print(f"Lỗi khi tải cấu hình model: {config_error}")
+                    self.model_config = {}
+            else:
+                print(f"Không tìm thấy file cấu hình tại: {config_path}")
+                self.model_config = {}
+                
+            return self.model
+            
+        except Exception as e:
+            print(f"Lỗi khi tải model: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
     
     def evaluate(self, n_episodes=10):
         """

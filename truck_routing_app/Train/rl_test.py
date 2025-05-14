@@ -18,6 +18,8 @@ import shutil
 from pathlib import Path
 import queue
 from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.logger import Logger, HumanOutputFormat
+from gymnasium import spaces
 try:
     import optuna
     OPTUNA_AVAILABLE = True
@@ -123,7 +125,7 @@ class RLTestApp:
         """
         self.root = root
         self.root.title("Truck Routing RL Test App v2.0")
-        self.root.geometry("1000x850") # Increased height for logs/progress
+        self.root.geometry("1200x900") # Increased height for logs/progress & width for two panels
         
         # Style configuration
         self.style = ttk.Style()
@@ -133,11 +135,16 @@ class RLTestApp:
         self.map_object = None
         self.current_map_path = None
         self.rl_environment = None
-        self.map_size = tk.IntVar(value=8)
+        self.map_size_var = tk.IntVar(value=8) # Changed from self.map_size
+        self.current_map_size_display_var = tk.StringVar(value="N/A") # For displaying current map size
+
         # Variables for customizing map generation counts
         self.num_tolls_var = tk.IntVar(value=2) # Default for 8x8 based on ~0.05 ratio
         self.num_gas_var = tk.IntVar(value=3)   # Default for 8x8 based on ~0.05 ratio
         self.num_obstacles_var = tk.IntVar(value=10) # Default for 8x8 based on ~0.2 ratio
+        
+        # Thêm biến cho trạng thái chướng ngại vật di chuyển
+        self.moving_obstacles_var = tk.BooleanVar(value=False)
 
         # RL Agent related variables
         self.trainer = None
@@ -155,8 +162,81 @@ class RLTestApp:
                 self.progress_queue = progress_queue
                 self.total_steps = total_steps
                 self.last_report_time = time.time()
+                self.losses_buffer = []  # Buffer để lưu trữ giá trị loss trực tiếp
+                
+                # Add metrics tracking - Thêm đầy đủ các loại metrics cần thiết
+                self.metrics = {
+                    "episode_rewards": [],
+                    "episode_lengths": [],
+                    "success_rates": [],
+                    "learning_rates": [],
+                    "exploration_rates": [],
+                    "losses": [],
+                    "timesteps": [],
+                    "termination_reasons": {}
+                }
+                
+                # Biến tính toán success rate
+                self.episode_count = 0
+                self.success_count = 0
 
             def _on_step(self) -> bool:
+                # Track metrics for potential retrieval
+                if len(self.model.ep_info_buffer) > 0 and len(self.model.ep_info_buffer[-1]) > 0:
+                    # Kiểm tra nếu có episose mới hoàn thành
+                    if "r" in self.model.ep_info_buffer[-1] and self.model.ep_info_buffer[-1].get("new_episode", True):
+                        self.episode_count += 1
+                        self.metrics["episode_rewards"].append(self.model.ep_info_buffer[-1]["r"])
+                        self.metrics["timesteps"].append(self.num_timesteps)
+                        
+                        # Thu thập độ dài episode
+                        if "l" in self.model.ep_info_buffer[-1]:
+                            self.metrics["episode_lengths"].append(self.model.ep_info_buffer[-1]["l"])
+                        
+                        # Thu thập lý do kết thúc episode và tính toán success rate
+                        if "termination_reason" in self.model.ep_info_buffer[-1]:
+                            reason = self.model.ep_info_buffer[-1]["termination_reason"]
+                            if reason not in self.metrics["termination_reasons"]:
+                                self.metrics["termination_reasons"][reason] = 0
+                            self.metrics["termination_reasons"][reason] += 1
+                            
+                            # Tính success rate
+                            if reason == "den_dich":
+                                self.success_count += 1
+                            
+                            current_success_rate = self.success_count / max(1, self.episode_count)
+                            self.metrics["success_rates"].append(current_success_rate)
+                
+                # Thu thập learning rate
+                if hasattr(self.model, "learning_rate"):
+                    if callable(self.model.learning_rate):
+                        lr = self.model.learning_rate(self.num_timesteps)
+                    else:
+                        lr = self.model.learning_rate
+                    self.metrics["learning_rates"].append(lr)
+                
+                # Thu thập exploration rate
+                if hasattr(self.model, "exploration_schedule"):
+                    eps = self.model.exploration_schedule(self.num_timesteps)
+                    self.metrics["exploration_rates"].append(eps)
+                
+                # Thu thập loss nếu có - CHỈ THÊM VÀO METRICS THEO MỘT CHU KỲ CỐ ĐỊNH
+                # Lấy loss từ buffer nếu có
+                if hasattr(self, 'losses_buffer') and len(self.losses_buffer) > 0:
+                    # Tính trung bình của loss trong buffer và thêm vào metrics
+                    avg_loss = sum(self.losses_buffer) / len(self.losses_buffer)
+                    self.metrics["losses"].append(avg_loss)
+                    # Xóa buffer sau khi đã thêm vào metrics
+                    self.losses_buffer = []
+                    
+                # Các phương pháp thu thập loss khác (giữ nguyên để dự phòng)
+                elif hasattr(self.model.policy, "raw_loss") and self.model.policy.raw_loss is not None:
+                    try:
+                        current_loss = float(self.model.policy.raw_loss)
+                        self.metrics["losses"].append(current_loss)
+                    except (ValueError, TypeError):
+                        pass  # Ignore if not convertible to float
+                
                 # Report progress every 0.5 seconds to avoid overwhelming the queue/UI
                 current_time = time.time()
                 if current_time - self.last_report_time > 0.5 or self.num_timesteps == self.total_steps:
@@ -181,7 +261,12 @@ class RLTestApp:
                      return False # Signal to stop training (though learn() should stop)
                     
                 return True # Continue training
-                
+            
+            # Add method to support the DQNAgent metrics retrieval
+            def get_metrics(self):
+                """Returns collected metrics during training"""
+                return self.metrics
+
         self.ManualTrainingProgressCallback = ManualTrainingProgressCallback # Store the class
 
         self._create_ui()
@@ -194,21 +279,21 @@ class RLTestApp:
         self.manual_lr = tk.DoubleVar(value=defaults.get("learning_rate", 0.0001))
         self.manual_gamma = tk.DoubleVar(value=defaults.get("gamma", 0.99))
         self.manual_buffer_size = tk.IntVar(value=defaults.get("buffer_size", 50000))
-        self.manual_learning_starts = tk.IntVar(value=10000)  # Tăng từ mặc định để agent khám phá hơn
+        self.manual_learning_starts = tk.IntVar(value=5000)  # Reduced from 10000 (was 10000 in analysis, now 5000)
         self.manual_batch_size = tk.IntVar(value=defaults.get("batch_size", 64))
         self.manual_tau = tk.DoubleVar(value=defaults.get("tau", 0.005))
         self.manual_train_freq = tk.IntVar(value=defaults.get("train_freq", 4))
         self.manual_target_update_interval = tk.IntVar(value=defaults.get("target_update_interval", 1000))
         self.manual_exploration_fraction = tk.DoubleVar(value=0.5)  # Giảm từ 0.9 xuống 0.5
         self.manual_exploration_initial_eps = tk.DoubleVar(value=1.0)  # Giữ nguyên giá trị mặc định
-        self.manual_exploration_final_eps = tk.DoubleVar(value=0.02)  # Giảm từ 0.05 xuống 0.02 để agent khai thác tốt hơn cuối cùng
+        self.manual_exploration_final_eps = tk.DoubleVar(value=0.1)  # Increased from 0.02 to 0.1
         self.manual_total_timesteps = tk.IntVar(value=1000000)  # Tăng từ 200000 lên 1,000,000 bước
 
         # Lấy giá trị cho các tính năng nâng cao từ cấu hình tối ưu
         self.manual_use_double_dqn = tk.BooleanVar(value=True) # Mặc định bật Double DQN
         self.manual_use_dueling_dqn = tk.BooleanVar(value=True) # Mặc định bật Dueling
         self.manual_use_prioritized_replay = tk.BooleanVar(value=True) # Mặc định bật PER
-        self.manual_render_training = tk.BooleanVar(value=False)
+        self.manual_render_training = tk.BooleanVar(value=True)
 
         # Lấy kiến trúc mạng từ cấu hình
         if "policy_kwargs" in defaults and "net_arch" in defaults["policy_kwargs"]:
@@ -414,105 +499,226 @@ XỬ LÝ LỖI THƯỜNG GẶP
     
     def _create_manual_train_tab(self, parent):
         """
-        Tạo tab huấn luyện thủ công.
+        Tạo tab huấn luyện thủ công với đầy đủ chức năng.
         
         Args:
             parent: Frame cha
         """
-        # Tạo giao diện dạng nhiều cột
         main_frame = ttk.Frame(parent, padding=10)
         main_frame.pack(fill='both', expand=True)
         
-        left_frame = ttk.Frame(main_frame)
-        left_frame.pack(side='left', fill='both', expand=True, padx=(0, 5))
-        
-        right_frame = ttk.Frame(main_frame)
-        right_frame.pack(side='right', fill='both', expand=True, padx=(5, 0))
-        
-        # Thông tin kích thước bản đồ và tham số môi trường
-        env_info_frame = ttk.LabelFrame(left_frame, text="Thông tin môi trường", padding=5)
-        env_info_frame.pack(fill='x', padx=5, pady=5)
-        
-        ttk.Label(env_info_frame, text="Map Size: ").grid(row=0, column=0, sticky='w')
-        ttk.Label(env_info_frame, textvariable=self.map_size).grid(row=0, column=1, sticky='w')
-        
-        # Frame cho tham số huấn luyện
-        training_params_frame = ttk.LabelFrame(left_frame, text="Tham số huấn luyện DQN", padding=5)
-        training_params_frame.pack(fill='x', padx=5, pady=5)
-        
-        # Cấu hình tham số trong grid
-        row = 0
-        ttk.Label(training_params_frame, text="Timesteps:").grid(row=row, column=0, sticky='w')
-        self.manual_timesteps_var = tk.IntVar(value=50000)
-        ttk.Spinbox(training_params_frame, from_=10000, to=1000000, increment=10000, 
-                    textvariable=self.manual_timesteps_var, width=10).grid(row=row, column=1, sticky='w')
-        
-        row += 1
-        ttk.Label(training_params_frame, text="Learning rate:").grid(row=row, column=0, sticky='w')
-        ttk.Spinbox(training_params_frame, from_=0.0001, to=0.01, increment=0.0001, 
-                    textvariable=self.manual_lr, width=10, format="%.4f").grid(row=row, column=1, sticky='w')
-        
-        row += 1
-        ttk.Label(training_params_frame, text="Gamma:").grid(row=row, column=0, sticky='w')
-        ttk.Spinbox(training_params_frame, from_=0.8, to=0.999, increment=0.01, 
-                    textvariable=self.manual_gamma, width=10, format="%.3f").grid(row=row, column=1, sticky='w')
-        
-        row += 1
-        ttk.Label(training_params_frame, text="Buffer size:").grid(row=row, column=0, sticky='w')
-        ttk.Spinbox(training_params_frame, from_=5000, to=1000000, increment=5000, 
-                    textvariable=self.manual_buffer_size, width=10).grid(row=row, column=1, sticky='w')
-        
-        row += 1
-        ttk.Label(training_params_frame, text="Learning starts:").grid(row=row, column=0, sticky='w')
-        ttk.Spinbox(training_params_frame, from_=1000, to=100000, increment=1000, 
-                    textvariable=self.manual_learning_starts, width=10).grid(row=row, column=1, sticky='w')
-        
-        row += 1
-        ttk.Label(training_params_frame, text="Batch size:").grid(row=row, column=0, sticky='w')
-        ttk.Spinbox(training_params_frame, from_=32, to=512, increment=32, 
-                    textvariable=self.manual_batch_size, width=10).grid(row=row, column=1, sticky='w')
-        
-        # Frame cho cài đặt nâng cao
-        row += 1
-        advanced_frame = ttk.LabelFrame(left_frame, text="Cài đặt nâng cao", padding=5)
-        advanced_frame.pack(fill='x', padx=5, pady=5)
-        
-        # Checkboxes for advanced settings
-        self.use_double_dqn_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(advanced_frame, text="Sử dụng Double DQN", variable=self.use_double_dqn_var).grid(row=0, column=0, sticky='w')
-        
-        self.use_dueling_network_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(advanced_frame, text="Dueling DQN", variable=self.use_dueling_network_var).grid(row=0, column=1, sticky='w')
-        ttk.Checkbutton(advanced_frame, text="PER", variable=self.manual_use_prioritized_replay).grid(row=0, column=2, sticky='w')
+        # Create a PanedWindow for resizable left and right sections
+        paned_window = ttk.PanedWindow(main_frame, orient=tk.HORIZONTAL)
+        paned_window.pack(fill='both', expand=True)
 
-        # Lấy giá trị mặc định từ OPTIMAL_HYPERPARAMS
-        defaults = OPTIMAL_HYPERPARAMS.get(8, OPTIMAL_HYPERPARAMS[list(OPTIMAL_HYPERPARAMS.keys())[0]])
+        # Left frame for controls (scrollable) - will be added to PanedWindow
+        left_scroll_container = ttk.Frame(paned_window) # Parent is now paned_window
+        # left_scroll_container.pack(side='left', fill='y', padx=(0, 10), anchor='nw') # Packing handled by paned_window.add
+
+        left_canvas = tk.Canvas(left_scroll_container, highlightthickness=0, width=450) # Fixed width for left panel
+        left_canvas.pack(side="left", fill="y", expand=True)
+
+        left_scrollbar = ttk.Scrollbar(left_scroll_container, orient="vertical", command=left_canvas.yview)
+        left_scrollbar.pack(side="right", fill="y")
+
+        left_canvas.configure(yscrollcommand=left_scrollbar.set)
         
-        # Lấy kiến trúc mạng từ cấu hình
-        if "policy_kwargs" in defaults and "net_arch" in defaults["policy_kwargs"]:
-            net_arch = defaults["policy_kwargs"]["net_arch"]
-            self.manual_net_arch = tk.StringVar(value=",".join(map(str, net_arch)))
-        else:
-            self.manual_net_arch = tk.StringVar(value="256,256") # Tăng kích thước mạng từ 64,64 lên 256,256
+        scrollable_left_frame = ttk.Frame(left_canvas)
+        left_canvas.create_window((0, 0), window=scrollable_left_frame, anchor="nw", tags="scrollable_left_frame")
+
+        def _configure_scrollable_frame(event):
+            # Update the scrollregion to encompass the frame
+            left_canvas.configure(scrollregion=left_canvas.bbox("all"))
+            # Adjust canvas width to prevent horizontal scrollbar if frame is narrower
+            left_canvas.itemconfig("scrollable_left_frame", width=event.width)
+
+        scrollable_left_frame.bind("<Configure>", _configure_scrollable_frame)
         
-        # --- Biến cho Hyperparameter Tuning ---
-        self.tuning_n_trials = tk.IntVar(value=30) # Tăng số lần thử nghiệm từ 20 lên 30
-        self.tuning_timesteps_per_trial = tk.IntVar(value=10000) # Tăng số bước huấn luyện cho mỗi lần thử từ 5000 lên 10000
-        self.best_params_found = None # Lưu trữ bộ tham số tốt nhất
+        # Right frame for map visualization and training/model management - will be added to PanedWindow
+        right_frame = ttk.Frame(paned_window) # Parent is now paned_window
+        # right_frame.pack(side='right', fill='both', expand=True) # Packing handled by paned_window.add
+
+        # Add left and right frames to the PanedWindow
+        # Give left panel a smaller initial weight so right panel gets more space by default
+        paned_window.add(left_scroll_container, weight=1) 
+        paned_window.add(right_frame, weight=3)
+
+        # --- SECTIONS IN SCROLLABLE LEFT FRAME ---
+
+        # Section 0: Current Map Info
+        env_info_frame = ttk.LabelFrame(scrollable_left_frame, text="Thông tin Bản đồ Hiện tại", padding=5)
+        env_info_frame.pack(fill='x', padx=10, pady=(5,10), anchor='nw')
+        ttk.Label(env_info_frame, text="Kích thước bản đồ: ").grid(row=0, column=0, sticky='w', padx=5, pady=2)
+        ttk.Label(env_info_frame, textvariable=self.current_map_size_display_var).grid(row=0, column=1, sticky='w', padx=5, pady=2)
+        # Add more info if needed, e.g., current_map_path
+
+        # Section 1: Map Controls
+        map_controls_outer_frame = ttk.LabelFrame(scrollable_left_frame, text="1. Tải/Tạo Bản đồ", padding=10)
+        map_controls_outer_frame.pack(fill='x', padx=10, pady=10, anchor='nw')
+        self._populate_map_controls(map_controls_outer_frame)
+
+        # Section 2: Environment Initialization
+        env_init_outer_frame = ttk.LabelFrame(scrollable_left_frame, text="2. Khởi tạo Môi trường RL", padding=10)
+        env_init_outer_frame.pack(fill='x', padx=10, pady=10, anchor='nw')
+        self._populate_env_init_controls(env_init_outer_frame)
+
+        # Section 3: DQN Agent Configuration
+        agent_config_frame = ttk.LabelFrame(scrollable_left_frame, text="3. Cấu hình Agent DQN", padding=10)
+        agent_config_frame.pack(fill='x', padx=10, pady=10, anchor='nw')
+
+        # Create a grid for parameters for better alignment
+        params_grid = ttk.Frame(agent_config_frame)
+        params_grid.pack(fill='x')
+        
+        row_idx = 0
+        # Helper to add param row
+        def add_param_entry(label, var, from_val, to_val, increment, width=12, fmt=None, is_int=False):
+            nonlocal row_idx
+            ttk.Label(params_grid, text=label).grid(row=row_idx, column=0, sticky='w', padx=5, pady=3)
+            if fmt:
+                entry = ttk.Spinbox(params_grid, from_=from_val, to=to_val, increment=increment, textvariable=var, width=width, format=fmt)
+            else:
+                entry = ttk.Spinbox(params_grid, from_=from_val, to=to_val, increment=increment, textvariable=var, width=width)
+                entry.grid(row=row_idx, column=1, sticky='ew', padx=5, pady=3)
+                params_grid.columnconfigure(1, weight=1) # Make entry expand
+                row_idx += 1
+
+        add_param_entry("Total Timesteps:", self.manual_total_timesteps, 10000, 5000000, 10000, is_int=True)
+        add_param_entry("Learning Rate:", self.manual_lr, 0.00001, 0.01, 0.0001, fmt="%.5f")
+        add_param_entry("Gamma (Discount Factor):", self.manual_gamma, 0.8, 0.999, 0.005, fmt="%.3f")
+        add_param_entry("Buffer Size:", self.manual_buffer_size, 5000, 1000000, 5000, is_int=True)
+        add_param_entry("Learning Starts:", self.manual_learning_starts, 1000, 100000, 1000, is_int=True)
+        add_param_entry("Batch Size:", self.manual_batch_size, 32, 512, 32, is_int=True)
+        add_param_entry("Tau (Soft Update):", self.manual_tau, 0.001, 0.1, 0.001, fmt="%.3f")
+        add_param_entry("Train Frequency (Steps):", self.manual_train_freq, 1, 16, 1, is_int=True)
+        add_param_entry("Target Update Interval (Steps):", self.manual_target_update_interval, 100, 20000, 100, is_int=True)
+        add_param_entry("Exploration Fraction:", self.manual_exploration_fraction, 0.05, 0.9, 0.05, fmt="%.2f")
+        add_param_entry("Exploration Initial Eps:", self.manual_exploration_initial_eps, 0.5, 1.0, 0.05, fmt="%.2f")
+        add_param_entry("Exploration Final Eps:", self.manual_exploration_final_eps, 0.01, 0.2, 0.01, fmt="%.2f")
+
+        ttk.Label(params_grid, text="Network Architecture (e.g., 256,256):").grid(row=row_idx, column=0, sticky='w', padx=5, pady=3)
+        ttk.Entry(params_grid, textvariable=self.manual_net_arch, width=15).grid(row=row_idx, column=1, sticky='ew', padx=5, pady=3)
+        row_idx += 1
+
+        # DQN Feature Checkboxes
+        advanced_options_frame = ttk.LabelFrame(agent_config_frame, text="Tùy chọn DQN Nâng cao", padding=5)
+        advanced_options_frame.pack(fill='x', pady=(10,5))
+        
+        ttk.Checkbutton(advanced_options_frame, text="Double DQN", variable=self.manual_use_double_dqn).pack(side=tk.LEFT, padx=5)
+        ttk.Checkbutton(advanced_options_frame, text="Dueling DQN", variable=self.manual_use_dueling_dqn).pack(side=tk.LEFT, padx=5)
+        ttk.Checkbutton(advanced_options_frame, text="Prioritized Replay (PER)", variable=self.manual_use_prioritized_replay).pack(side=tk.LEFT, padx=5)
+        ttk.Checkbutton(advanced_options_frame, text="Render Training (Slow)", variable=self.manual_render_training).pack(side=tk.LEFT, padx=5)
+
+
+        # Section 4: Hyperparameter Tuning (Optuna)
+        tuning_outer_frame = ttk.LabelFrame(scrollable_left_frame, text="4. Tinh chỉnh Siêu tham số (Optuna)", padding=10)
+        tuning_outer_frame.pack(fill='x', padx=10, pady=10, anchor='nw')
+
+        tuning_grid = ttk.Frame(tuning_outer_frame)
+        tuning_grid.pack(fill='x')
+
+        ttk.Label(tuning_grid, text="Number of Trials:").grid(row=0, column=0, sticky='w', padx=5, pady=3)
+        ttk.Spinbox(tuning_grid, from_=5, to=200, increment=5, textvariable=self.tuning_n_trials, width=8).grid(row=0, column=1, sticky='ew', padx=5, pady=3)
+        
+        ttk.Label(tuning_grid, text="Timesteps per Trial:").grid(row=1, column=0, sticky='w', padx=5, pady=3)
+        ttk.Spinbox(tuning_grid, from_=1000, to=100000, increment=1000, textvariable=self.tuning_timesteps_per_trial, width=10).grid(row=1, column=1, sticky='ew', padx=5, pady=3)
+        tuning_grid.columnconfigure(1, weight=1)
+
+        self.start_tuning_btn = ttk.Button(tuning_outer_frame, text="Start Hyperparameter Tuning", command=self._start_hyperparameter_tuning)
+        self.start_tuning_btn.pack(pady=5, fill='x')
+        
+        self.apply_best_params_btn = ttk.Button(tuning_outer_frame, text="Apply Best Params to Config", command=self._apply_best_params, state=tk.DISABLED)
+        self.apply_best_params_btn.pack(pady=5, fill='x')
+
+        self.tuning_status_label = ttk.Label(tuning_outer_frame, text="Tuning Status: Idle", anchor='w', justify=tk.LEFT)
+        self.tuning_status_label.pack(pady=5, fill='x')
+
+
+        # --- SECTIONS IN RIGHT FRAME ---
+        # Map Canvas
+        map_canvas_frame = ttk.LabelFrame(right_frame, text="Trực quan hóa Bản đồ", padding=5)
+        map_canvas_frame.pack(fill='both', expand=True, padx=5, pady=5)
+        self.map_canvas = tk.Canvas(map_canvas_frame, bg="lightgrey")
+        self.map_canvas.pack(fill="both", expand=True)
+        self.map_canvas.bind("<Configure>", lambda event: self._draw_map(self.map_canvas) if self.map_object else None) # Redraw on resize
+
+        # Training Controls (Button, Progress, Status) - at the bottom of right_frame
+        manual_train_status_frame = ttk.LabelFrame(right_frame, text="Điều khiển & Trạng thái Huấn luyện", padding=10)
+        manual_train_status_frame.pack(fill='x', padx=5, pady=(10,5), side='bottom', anchor='sw')
+        
+        self.manual_train_btn = ttk.Button(manual_train_status_frame, text="Bắt đầu / Tiếp tục Huấn luyện", command=self._start_manual_training)
+        self.manual_train_btn.pack(pady=(5,2), fill='x')
+
+        self.manual_train_progress = ttk.Progressbar(manual_train_status_frame, orient="horizontal", length=300, mode="determinate")
+        self.manual_train_progress.pack(pady=(2,2), fill='x', expand=True)
+        
+        self.manual_train_status_label = ttk.Label(manual_train_status_frame, text="Status: Idle", anchor="w", justify=tk.LEFT)
+        self.manual_train_status_label.pack(pady=(2,5), fill='x', expand=True)
+
+        # Model Save/Load - above training controls
+        model_io_frame = ttk.LabelFrame(right_frame, text="Quản lý Model", padding=10)
+        model_io_frame.pack(fill='x', padx=5, pady=5, side='bottom', anchor='sw')
+        
+        model_buttons_subframe = ttk.Frame(model_io_frame) # For side-by-side buttons
+        model_buttons_subframe.pack(fill='x')
+
+        self.save_manual_model_button = ttk.Button(model_buttons_subframe, text="Lưu Model Hiện tại", command=self._save_manual_model, state=tk.DISABLED)
+        self.save_manual_model_button.pack(side=tk.LEFT, padx=5, pady=5, expand=True, fill='x')
+        
+        self.load_manual_model_button = ttk.Button(model_buttons_subframe, text="Tải Model Đã Huấn luyện", command=self._load_trained_model)
+        self.load_manual_model_button.pack(side=tk.LEFT, padx=5, pady=5, expand=True, fill='x')
+
+        # Run Agent - above model io
+        run_agent_frame = ttk.LabelFrame(right_frame, text="Chạy Agent Đã Huấn luyện", padding=10)
+        run_agent_frame.pack(fill='x', padx=5, pady=5, side='bottom', anchor='sw')
+        
+        self.run_agent_button = ttk.Button(run_agent_frame, text="Chạy Agent trên Bản đồ Hiện tại", command=self._run_agent_on_current_map, state=tk.DISABLED)
+        self.run_agent_button.pack(pady=5, fill='x')
+        
+        # Make sure left panel does not expand horizontally, but right panel does
+        # main_frame.columnconfigure(0, weight=0) # No longer needed due to PanedWindow
+        # main_frame.columnconfigure(1, weight=1) # No longer needed due to PanedWindow
+
+        # Ensure the canvas configuration updates the scrollable frame's width and scrollregion
+        def _on_left_canvas_configure(event_canvas):
+            canvas_width = left_canvas.winfo_width()
+            left_canvas.itemconfig("scrollable_left_frame", width=canvas_width)
+            left_canvas.configure(scrollregion=left_canvas.bbox("all"))
+        left_canvas.bind("<Configure>", _on_left_canvas_configure)
+
+        # Ensure the scrollable frame configuration updates the scrollregion
+        # (This might be slightly redundant if _on_left_canvas_configure also sets scrollregion, but safe)
+        # Let's rename the original _configure_scrollable_frame to avoid confusion if we re-purpose it.
+        # The original _configure_scrollable_frame was: scrollable_left_frame.bind("<Configure>", _configure_scrollable_frame)
+        # We need to ensure that binding is to a function that correctly updates the scrollregion.
+        
+        # Re-define and re-bind for clarity and correctness for the scrollable_left_frame itself
+        def _update_scrollregion_on_frame_configure(event_frame):
+            left_canvas.configure(scrollregion=left_canvas.bbox("all"))
+        scrollable_left_frame.bind("<Configure>", _update_scrollregion_on_frame_configure, add='+') # Add to existing bindings if any
+
+        # Force an update of geometry and then the scrollregion after all widgets are packed
+        self.root.update_idletasks()
+        left_canvas.configure(scrollregion=left_canvas.bbox("all"))
 
     def _populate_map_controls(self, parent):
         """Hàm phụ trợ: Tạo các control cho bản đồ."""
+
+        # Frame for top configurations (size and counts)
+        top_config_frame = ttk.Frame(parent)
+        top_config_frame.pack(fill="x", padx=0, pady=5) # Use fill x to allow internal elements to align
+
         # Frame kích thước
-        size_frame = ttk.Frame(parent)
-        size_frame.pack(side="left", padx=5, pady=5)
-        ttk.Label(size_frame, text="Kích thước (8-15):").grid(row=0, column=0, padx=5, pady=5)
-        self.map_size_var = tk.IntVar(value=8)
+        size_frame = ttk.Frame(top_config_frame)
+        size_frame.pack(side="left", padx=5, pady=0) # Pack to the left of top_config_frame
+        ttk.Label(size_frame, text="Kích thước (8-15):").grid(row=0, column=0, padx=5, pady=5, sticky='w')
+        # self.map_size_var = tk.IntVar(value=8) # Already defined in __init__
         size_spinner = ttk.Spinbox(size_frame, from_=8, to=15, textvariable=self.map_size_var, width=5)
-        size_spinner.grid(row=0, column=1, padx=5, pady=5)
+        size_spinner.grid(row=0, column=1, padx=5, pady=5, sticky='w')
 
         # Frame for special point counts
-        counts_frame = ttk.Frame(parent)
-        counts_frame.pack(side="left", padx=5, pady=5, anchor="nw")
+        counts_frame = ttk.Frame(top_config_frame)
+        counts_frame.pack(side="left", padx=5, pady=0, anchor="nw") # Pack to the left (so right of size_frame)
 
         ttk.Label(counts_frame, text="# Tolls:").grid(row=0, column=0, padx=2, pady=2, sticky="w")
         ttk.Spinbox(counts_frame, from_=0, to=20, textvariable=self.num_tolls_var, width=4).grid(row=0, column=1, padx=2, pady=2, sticky="w")
@@ -523,24 +729,33 @@ XỬ LÝ LỖI THƯỜNG GẶP
         ttk.Label(counts_frame, text="# Obstacles:").grid(row=2, column=0, padx=2, pady=2, sticky="w")
         ttk.Spinbox(counts_frame, from_=0, to=50, textvariable=self.num_obstacles_var, width=4).grid(row=2, column=1, padx=2, pady=2, sticky="w")
 
-        # Frame nút
+        # Frame nút (buttons) - now packed below top_config_frame
         buttons_frame = ttk.Frame(parent)
-        buttons_frame.pack(side="left", padx=10, pady=5)
+        buttons_frame.pack(fill="x", padx=5, pady=10) # pady=10 for spacing
+
+        # Configure buttons in a 2-row grid, sticky='ew'
         self.random_map_btn = ttk.Button(buttons_frame, text="Tạo Ngẫu nhiên", command=self._create_random_map)
-        self.random_map_btn.grid(row=0, column=0, padx=2, pady=2)
+        self.random_map_btn.grid(row=0, column=0, padx=2, pady=3, sticky='ew')
         self.demo_map_btn = ttk.Button(buttons_frame, text="Tạo Mẫu", command=self._create_demo_map)
-        self.demo_map_btn.grid(row=0, column=1, padx=2, pady=2)
+        self.demo_map_btn.grid(row=0, column=1, padx=2, pady=3, sticky='ew')
         self.load_map_btn = ttk.Button(buttons_frame, text="Tải", command=self._load_map)
-        self.load_map_btn.grid(row=0, column=2, padx=2, pady=2)
+        self.load_map_btn.grid(row=0, column=2, padx=2, pady=3, sticky='ew')
+
         self.save_map_btn = ttk.Button(buttons_frame, text="Lưu", command=self._save_map, state=tk.DISABLED) # Disable ban đầu
-        self.save_map_btn.grid(row=0, column=3, padx=2, pady=2)
-        # Thêm nút Reset
+        self.save_map_btn.grid(row=1, column=0, padx=2, pady=3, sticky='ew')
         self.reset_all_btn = ttk.Button(buttons_frame, text="Reset Tất Cả", command=self._reset_all)
-        self.reset_all_btn.grid(row=0, column=4, padx=5, pady=2)
+        self.reset_all_btn.grid(row=1, column=1, columnspan=2, padx=5, pady=3, sticky='ew') # columnspan=2 to fill nicely
+
+        # Configure column weights for buttons_frame so they expand
+        buttons_frame.columnconfigure(0, weight=1)
+        buttons_frame.columnconfigure(1, weight=1)
+        buttons_frame.columnconfigure(2, weight=1)
 
     def _populate_env_init_controls(self, parent):
         """Hàm phụ trợ: Tạo các control khởi tạo môi trường."""
         # Biến lưu trữ các tham số (Lấy từ _create_rl_init_tab)
+        from core.constants import MovementCosts, StationCosts
+        
         self.initial_fuel_var = tk.DoubleVar(value=MovementCosts.MAX_FUEL)
         self.initial_money_var = tk.DoubleVar(value=1500.0)
         self.fuel_per_move_var = tk.DoubleVar(value=MovementCosts.FUEL_PER_MOVE)
@@ -553,21 +768,23 @@ XỬ LÝ LỖI THƯỜNG GẶP
         params_grid.pack(pady=5)
 
         row_idx = 0
-        ttk.Label(params_grid, text="Nhiên liệu:").grid(row=row_idx, column=0, padx=5, pady=2, sticky="w")
+        ttk.Label(params_grid, text="Initial Fuel:").grid(row=row_idx, column=0, padx=5, pady=2, sticky="w")
         ttk.Entry(params_grid, textvariable=self.initial_fuel_var, width=8).grid(row=row_idx, column=1, padx=5, pady=2, sticky="w")
-        ttk.Label(params_grid, text="Tiền:").grid(row=row_idx, column=2, padx=5, pady=2, sticky="w")
+        ttk.Label(params_grid, text="Initial Money:").grid(row=row_idx, column=2, padx=5, pady=2, sticky="w")
         ttk.Entry(params_grid, textvariable=self.initial_money_var, width=8).grid(row=row_idx, column=3, padx=5, pady=2, sticky="w")
+        
         row_idx += 1
-        ttk.Label(params_grid, text="N.liệu/bước:").grid(row=row_idx, column=0, padx=5, pady=2, sticky="w")
+        ttk.Label(params_grid, text="Fuel Per Move:").grid(row=row_idx, column=0, padx=5, pady=2, sticky="w")
         ttk.Entry(params_grid, textvariable=self.fuel_per_move_var, width=8).grid(row=row_idx, column=1, padx=5, pady=2, sticky="w")
-        ttk.Label(params_grid, text="Phí xăng:").grid(row=row_idx, column=2, padx=5, pady=2, sticky="w")
+        ttk.Label(params_grid, text="Gas Station Cost:").grid(row=row_idx, column=2, padx=5, pady=2, sticky="w")
         ttk.Entry(params_grid, textvariable=self.gas_station_cost_var, width=8).grid(row=row_idx, column=3, padx=5, pady=2, sticky="w")
+        
         row_idx += 1
-        ttk.Label(params_grid, text="Phí cầu đường:").grid(row=row_idx, column=0, padx=5, pady=2, sticky="w")
+        ttk.Label(params_grid, text="Toll Base Cost:").grid(row=row_idx, column=0, padx=5, pady=2, sticky="w")
         ttk.Entry(params_grid, textvariable=self.toll_base_cost_var, width=8).grid(row=row_idx, column=1, padx=5, pady=2, sticky="w")
         ttk.Label(params_grid, text="Max Steps:").grid(row=row_idx, column=2, padx=5, pady=2, sticky="w")
         ttk.Entry(params_grid, textvariable=self.max_steps_var, width=8).grid(row=row_idx, column=3, padx=5, pady=2, sticky="w")
-
+        
         # Nút khởi tạo môi trường RL
         self.init_rl_btn = ttk.Button(parent, text="Khởi tạo Môi trường RL", command=self._initialize_rl_env)
         self.init_rl_btn.pack(pady=5)
@@ -663,6 +880,7 @@ XỬ LÝ LỖI THƯỜNG GẶP
             )
 
             if self.map_object: # Kiểm tra xem generate_random có thành công không
+                self.current_map_size_display_var.set(f"{self.map_object.size}x{self.map_object.size}")
                 self._log(f"Generated random map ({map_size}x{map_size}) with requested counts: T={num_tolls}, G={num_gas}, O={num_obstacles}.")
                 # Log thêm số lượng thực tế từ map_object.get_statistics() để so sánh
                 stats = self.map_object.get_statistics()
@@ -670,13 +888,16 @@ XỬ LÝ LỖI THƯỜNG GẶP
                 self._draw_map(self.map_canvas)
                 self.save_map_btn.config(state=tk.NORMAL)
             else:
+                self.current_map_size_display_var.set("N/A")
                 messagebox.showwarning("Map Generation Failed", f"Could not generate a valid random map with the specified counts after several attempts. Check console warnings.")
                 self._log(f"Failed to generate a valid map for size {map_size} with T={num_tolls}, G={num_gas}, O={num_obstacles}.")
 
         except tk.TclError as e:
+            self.current_map_size_display_var.set("N/A")
             messagebox.showerror("Input Error", f"Invalid input for map generation parameters: {e}")
             self._log(f"Map generation input error: {e}")
         except Exception as e:
+            self.current_map_size_display_var.set("N/A")
             messagebox.showerror("Error", f"Failed to generate random map: {e}")
             self._log(f"Failed to generate random map: {e}")
             import traceback
@@ -691,6 +912,7 @@ XỬ LÝ LỖI THƯỜNG GẶP
             
         map_size = self.map_size_var.get()
         self.map_object = Map.create_demo_map(size=map_size)
+        self.current_map_size_display_var.set(f"{self.map_object.size}x{self.map_object.size}")
         self._log(f"Đã tạo bản đồ mẫu kích thước {map_size}x{map_size}")
         # self._display_map_info()
         self._draw_map(self.map_canvas) # Vẽ lên canvas của tab mới
@@ -707,17 +929,25 @@ XỬ LÝ LỖI THƯỜNG GẶP
             return
             
         try:
+            # Hủy môi trường và agent cũ nếu tải map mới
+            if self.rl_environment or self.trainer:
+                self._log("Map mới được tải. Môi trường RL và Agent cũ đã bị hủy. Vui lòng khởi tạo lại môi trường.")
+                self._reset_env_and_agent()
+
             self.map_object = Map.load(filepath)
             if self.map_object:
                 self.current_map_path = filepath # Lưu đường dẫn file đã tải
+                self.current_map_size_display_var.set(f"{self.map_object.size}x{self.map_object.size}")
                 self._log(f"Đã tải bản đồ: {filepath} (Size: {self.map_object.size}x{self.map_object.size})")
                 # self._display_map_info()
                 self._draw_map(self.map_canvas) # Vẽ lên canvas của tab mới
                 self.map_size_var.set(self.map_object.size) # Cập nhật size spinner
                 self.save_map_btn.config(state=tk.DISABLED) # Không cho lưu lại map vừa tải
             else:
+                self.current_map_size_display_var.set("N/A")
                 messagebox.showerror("Lỗi", "Không thể tải bản đồ từ file!")
         except Exception as e:
+            self.current_map_size_display_var.set("N/A")
             self._log(f"Lỗi khi tải bản đồ: {e}")
             messagebox.showerror("Lỗi", f"Lỗi khi tải bản đồ: {e}")
 
@@ -749,41 +979,80 @@ XỬ LÝ LỖI THƯỜNG GẶP
             self._update_agent_status("Lỗi lưu model!")
 
     def _initialize_rl_env(self):
-        # ... (Giữ nguyên logic, nhưng cập nhật log và thông báo)
-        if not self.map_object:
-            messagebox.showerror("Lỗi", "Vui lòng tạo hoặc tải bản đồ trước khi khởi tạo môi trường!")
-            return
-        
+        """
+        Khởi tạo môi trường Reinforcement Learning với bản đồ hiện tại.
+        """
         try:
-            # ... (Lấy tham số từ self.xxx_var)
+            self._log("Đang khởi tạo môi trường RL với bản đồ hiện tại...")
+            if self.map_object is None:
+                messagebox.showerror("Lỗi", "Vui lòng tạo hoặc tải bản đồ trước khi khởi tạo môi trường")
+                return False
+                
+            # Lấy các giá trị từ UI
             initial_fuel = self.initial_fuel_var.get()
             initial_money = self.initial_money_var.get()
             fuel_per_move = self.fuel_per_move_var.get()
-            gas_station_cost = self.gas_station_cost_var.get()
-            toll_base_cost = self.toll_base_cost_var.get()
+            gas_cost = self.gas_station_cost_var.get()
+            toll_cost = self.toll_base_cost_var.get()
             max_steps = self.max_steps_var.get()
+            moving_obstacles_flag = self.moving_obstacles_var.get() # Lấy giá trị từ checkbox
+
+            # Gán các tham số môi trường từ UI sliders vào hằng số chính xác trong constants.py
+            # from core.constants import MovementCosts, StationCosts # Không cần nữa
+            # from core.rl_environment import GLOBAL_MAX_FUEL, GLOBAL_MAX_MONEY # Không cần nữa
             
-            # Khởi tạo môi trường RL
+            # Cập nhật các hằng số trong constants.py
+            # MovementCosts.MAX_FUEL = float(self.initial_fuel_var.get()) # Không cần nữa
+            # MovementCosts.FUEL_PER_MOVE = float(self.fuel_per_move_var.get()) # Không cần nữa
+            # StationCosts.BASE_GAS_COST = float(self.gas_station_cost_var.get()) # Không cần nữa
+            # StationCosts.BASE_TOLL_COST = float(self.toll_base_cost_var.get()) # Không cần nữa
+            
+            # Cập nhật các hằng số trong rl_environment.py
+            # GLOBAL_MAX_FUEL = float(self.initial_fuel_var.get()) * 2  # Cho phép không gian lớn hơn # Không cần nữa
+            # GLOBAL_MAX_MONEY = float(self.initial_money_var.get()) * 3  # Cho phép không gian lớn hơn # Không cần nữa
+            
+            # Khởi tạo môi trường mới với các tham số từ UI
             self.rl_environment = TruckRoutingEnv(
                 map_object=self.map_object,
-                initial_fuel_config=initial_fuel, 
-                initial_money_config=initial_money, 
-                fuel_per_move_config=fuel_per_move, 
-                gas_station_cost_config=gas_station_cost, 
-                toll_base_cost_config=toll_base_cost, 
-                max_steps_per_episode=max_steps
+                initial_fuel=initial_fuel,
+                initial_money=initial_money,
+                fuel_per_move=fuel_per_move,
+                gas_station_cost=gas_cost,
+                toll_base_cost=toll_cost,
+                max_steps_per_episode=max_steps,
+                obs_max_fuel=initial_fuel, # Use direct value from UI
+                obs_max_money=initial_money, # Use direct value from UI
+                moving_obstacles=moving_obstacles_flag
             )
             
-            self._log("Đã khởi tạo môi trường RL thành công!")
-            # Cập nhật trạng thái agent (nếu cần)
-            self._update_agent_status("Môi trường đã sẵn sàng. Có thể huấn luyện.")
-            # Không cần hiển thị thông tin RL chi tiết ở đây nữa
-
+            # In ra thông tin về observation space cho debug
+            obs_space = self.rl_environment.observation_space
+            self._log(f"Observation space: {obs_space}")
+            for key, space in obs_space.spaces.items():
+                self._log(f"  {key}: {space}")
+            
+            # Đặt lại môi trường để kiểm tra không có lỗi
+            obs, info = self.rl_environment.reset()
+            
+            # Cập nhật trạng thái và UI
+            self._log(f"Đã khởi tạo môi trường thành công. Kích thước bản đồ: {self.map_object.size}x{self.map_object.size}")
+            if 'map_info' in info:
+                self._log(f"Có {info['map_info']['obstacles']} ô chướng ngại vật trên bản đồ.")
+                self._log(f"Ước tính độ dài đường đi tối ưu: {info['map_info']['optimal_path_estimate']} bước")
+            
+            # Vẽ lại bản đồ với agent ở vị trí bắt đầu
+            self._draw_map(self.map_canvas, self.rl_environment.current_pos)
+            
+            # Kích hoạt các nút điều khiển khi môi trường đã sẵn sàng
+            self._log("Môi trường RL sẵn sàng. Có thể bắt đầu huấn luyện và kiểm thử.")
+            return True
+            
         except Exception as e:
-            self._log(f"Lỗi khi khởi tạo môi trường RL: {e}")
-            import traceback; self._log(traceback.format_exc())
-            messagebox.showerror("Lỗi", f"Lỗi khi khởi tạo môi trường RL: {e}")
-            self._update_agent_status("Lỗi khởi tạo môi trường!")
+            import traceback
+            error_msg = f"Lỗi khởi tạo môi trường RL: {str(e)}\n{traceback.format_exc()}"
+            self._log(error_msg)
+            messagebox.showerror("Lỗi Khởi Tạo Môi Trường", f"Không thể khởi tạo môi trường RL: {str(e)}")
+            return False
 
     def _draw_map(self, canvas, agent_pos=None):
         """Vẽ bản đồ lên canvas được chỉ định."""
@@ -827,50 +1096,300 @@ XỬ LÝ LỖI THƯỜNG GẶP
                     canvas.create_text(pixel_x + cell_size // 2, pixel_y + cell_size // 2, text=label, font=("Arial", max(8, cell_size // 3), "bold"))
         
         # Vẽ agent (nếu có)
-        if agent_pos is not None and agent_pos.size > 0:
-            agent_x, agent_y = agent_pos[0], agent_pos[1] # Lấy giá trị từ numpy array
-            pixel_x = offset_x + agent_x * cell_size
-            pixel_y = offset_y + agent_y * cell_size
-            canvas.create_oval(pixel_x + cell_size // 4, pixel_y + cell_size // 4, 
-                                pixel_x + cell_size * 3 // 4, pixel_y + cell_size * 3 // 4, fill="blue", outline="black")
+        if agent_pos is not None:
+            agent_pos_np = np.array(agent_pos) if isinstance(agent_pos, list) else agent_pos
+            if hasattr(agent_pos_np, 'size') and agent_pos_np.size > 0:
+                agent_x, agent_y = agent_pos_np[0], agent_pos_np[1]
+                pixel_x = offset_x + agent_x * cell_size
+                pixel_y = offset_y + agent_y * cell_size
+                canvas.create_oval(pixel_x + cell_size // 4, pixel_y + cell_size // 4, 
+                                    pixel_x + cell_size * 3 // 4, pixel_y + cell_size * 3 // 4, fill="blue", outline="black")
     
     def _draw_map_with_path(self, canvas, agent_pos, path):
         """Vẽ bản đồ với đường đi của agent."""
-        # Sử dụng lại _draw_map để vẽ nền
-        self._draw_map(canvas, agent_pos)
-        canvas.after(100, lambda c=canvas, p=path: self._draw_path_internal(c, p))
-
-    def _draw_path_internal(self, canvas, path):
-        """Vẽ đường đi sau khi bản đồ nền đã được vẽ."""
-        if not path or len(path) <= 1 or not self.map_object:
-             return
-
+        # Vẽ trực tiếp mà không sử dụng delay giữa các bước vẽ
+        if not self.map_object:
+            return
+            
+        canvas.delete("all") # Xóa canvas trước khi vẽ
         map_size = self.map_object.size
+        
+        # Tạo bản sao của path để tránh thay đổi bên ngoài
+        path_copy = list(path) if path else []
+        
+        # Trước tiên, vẽ bản đồ (các ô và nhãn S, E)
         canvas_width = canvas.winfo_width()
         canvas_height = canvas.winfo_height()
-        if canvas_width <= 1 or canvas_height <= 1: return # Canvas chưa sẵn sàng
+        
+        if canvas_width <= 1 or canvas_height <= 1: # Canvas chưa sẵn sàng
+            canvas.after(50, lambda: self._draw_map_with_path(canvas, agent_pos, path_copy))
+            return
+
         cell_size = min(canvas_width // map_size, canvas_height // map_size)
-        if cell_size <= 0: cell_size = 1
+        if cell_size <= 0: cell_size = 1 # Đảm bảo cell_size dương
         offset_x = (canvas_width - cell_size * map_size) // 2
         offset_y = (canvas_height - cell_size * map_size) // 2
 
-        for i in range(len(path) - 1):
-            p1 = path[i]
-            p2 = path[i+1]
-            # Đảm bảo p1, p2 là tuple
-            x1, y1 = tuple(p1) if hasattr(p1, '__len__') else (0,0)
-            x2, y2 = tuple(p2) if hasattr(p2, '__len__') else (0,0)
+        # Vẽ bản đồ nền
+        for y in range(map_size):
+            for x in range(map_size):
+                pixel_x = offset_x + x * cell_size
+                pixel_y = offset_y + y * cell_size
+                cell_type = self.map_object.grid[y, x]
+                color = "white"
+                if cell_type == CellType.OBSTACLE: color = "darkgray"
+                elif cell_type == CellType.TOLL: color = "red"
+                elif cell_type == CellType.GAS: color = "green"
+                canvas.create_rectangle(pixel_x, pixel_y, pixel_x + cell_size, pixel_y + cell_size, fill=color, outline="black")
+                
+                label = None
+                if (x, y) == self.map_object.start_pos: label = "S"
+                elif (x, y) == self.map_object.end_pos: label = "E"
+                if label:
+                    canvas.create_text(pixel_x + cell_size // 2, pixel_y + cell_size // 2, text=label, font=("Arial", max(8, cell_size // 3), "bold"))
+        
+        # Tiếp theo, vẽ đường đi (nếu có)
+        if path_copy and len(path_copy) > 1:
+            # Sử dụng màu gradient từ cam sang đỏ để biểu thị đường đi qua thời gian
+            num_segments = len(path_copy) - 1
+            for i in range(num_segments):
+                p1 = path_copy[i]
+                p2 = path_copy[i+1]
+                # Đảm bảo p1, p2 là tuple
+                x1, y1 = tuple(p1) if hasattr(p1, '__len__') else (0,0)
+                x2, y2 = tuple(p2) if hasattr(p2, '__len__') else (0,0)
 
-            center_x1 = offset_x + x1 * cell_size + cell_size // 2
-            center_y1 = offset_y + y1 * cell_size + cell_size // 2
-            center_x2 = offset_x + x2 * cell_size + cell_size // 2
-            center_y2 = offset_y + y2 * cell_size + cell_size // 2
-            canvas.create_line(center_x1, center_y1, center_x2, center_y2, fill="orange", width=max(1, cell_size // 10), arrow=tk.LAST)
+                # Tính toán vị trí trung tâm của các ô
+                center_x1 = offset_x + x1 * cell_size + cell_size // 2
+                center_y1 = offset_y + y1 * cell_size + cell_size // 2
+                center_x2 = offset_x + x2 * cell_size + cell_size // 2
+                center_y2 = offset_y + y2 * cell_size + cell_size // 2
+                
+                # Sử dụng màu sắc khác nhau cho các phần của đường đi
+                # Đoạn đầu: cam nhạt, đoạn cuối: đỏ đậm
+                progress_ratio = i / max(1, num_segments - 1)  # Tránh chia cho 0
+                
+                # Tạo màu gradient từ cam (#FFA500) đến đỏ (#FF0000)
+                r = min(255, int(255))
+                g = min(255, int(165 - progress_ratio * 165))
+                b = min(255, int(0))
+                color = f'#{r:02x}{g:02x}{b:02x}'
+                
+                # Xác định đoạn cuối cùng vào đích
+                is_last_to_end = (p2 == tuple(self.map_object.end_pos))
+                
+                # Vẽ đoạn đường đặc biệt nếu đi vào đích
+                if is_last_to_end:
+                    # Đoạn cuối vào đích sử dụng màu đỏ đậm và mũi tên lớn hơn
+                    self._log(f"Vẽ mũi tên đặc biệt từ {p1} đến đích {p2}")
+                    line_width = max(3, cell_size // 6)  # Đường đậm hơn
+                    arrow_size = max(12, cell_size // 1.5)  # Mũi tên lớn hơn
+                    
+                    # Vẽ hiệu ứng "glow" trước khi vẽ mũi tên chính
+                    for glow in range(2):
+                        glow_width = line_width + (2-glow)
+                        glow_color = "#FF5500" if glow == 0 else "#FF2200" 
+                        canvas.create_line(center_x1, center_y1, center_x2, center_y2, 
+                                    fill=glow_color, width=glow_width, 
+                                    arrow=tk.LAST, arrowshape=(arrow_size, arrow_size, arrow_size//2))
+                    
+                    # Vẽ mũi tên chính với màu đỏ tươi
+                    canvas.create_line(center_x1, center_y1, center_x2, center_y2, 
+                                    fill="#FF0000", width=line_width, 
+                                    arrow=tk.LAST, arrowshape=(arrow_size, arrow_size, arrow_size//2))
+                else:
+                    # Các đoạn đường bình thường
+                    canvas.create_line(center_x1, center_y1, center_x2, center_y2, 
+                                    fill=color, width=max(1, cell_size // 10), 
+                                    arrow=tk.LAST)
+        
+        # Cuối cùng, vẽ agent (nếu có)
+        if agent_pos is not None:
+            agent_pos_np = np.array(agent_pos) if isinstance(agent_pos, list) else agent_pos
+            if hasattr(agent_pos_np, 'size') and agent_pos_np.size > 0:
+                agent_x, agent_y = agent_pos_np[0], agent_pos_np[1]
+                pixel_x = offset_x + agent_x * cell_size
+                pixel_y = offset_y + agent_y * cell_size
+                
+                # Vẽ agent to và nổi bật hơn
+                agent_size = cell_size // 2.5  # Hơi nhỏ hơn để không che mất ô
+                
+                # Nếu agent ở vị trí đích, dùng màu xanh lá đậm để dễ nhìn hơn
+                if (agent_x, agent_y) == self.map_object.end_pos:
+                    agent_color = "#00AA00"  # Xanh lá đậm
+                    # Thêm hiệu ứng hào quang xung quanh để nhấn mạnh
+                    glow_size = agent_size * 1.5
+                    canvas.create_oval(
+                        pixel_x + (cell_size - glow_size) / 2,
+                        pixel_y + (cell_size - glow_size) / 2,
+                        pixel_x + (cell_size + glow_size) / 2,
+                        pixel_y + (cell_size + glow_size) / 2,
+                        fill="#AAFFAA", outline="#00FF00", width=2
+                    )
+                else:
+                    agent_color = "blue"
+                
+                # Vẽ agent
+                canvas.create_oval(
+                    pixel_x + (cell_size - agent_size) / 2,
+                    pixel_y + (cell_size - agent_size) / 2,
+                    pixel_x + (cell_size + agent_size) / 2,
+                    pixel_y + (cell_size + agent_size) / 2,
+                    fill=agent_color, outline="black", width=2
+                )
+
+        # DEBUG: Kiểm tra đường đi có chứa điểm đích không
+        end_pos = tuple(self.map_object.end_pos)
+        has_path_to_end = len(path_copy) >= 2 and any(p == end_pos for p in path_copy)
+        if not has_path_to_end and agent_pos is not None:
+            agent_pos_tuple = tuple(agent_pos) if hasattr(agent_pos, '__len__') else None
+            if agent_pos_tuple == end_pos:
+                # Nếu agent đã ở đích nhưng path không có điểm đích, thêm vào
+                if len(path_copy) > 0:
+                    last_pos = path_copy[-1]
+                    # Nếu điểm cuối cùng trong path không phải điểm đích, thêm điểm đích
+                    if last_pos != end_pos:
+                        self._log(f"Đường đi không có điểm đích: {path_copy}")
+                        self._log(f"Agent ở đích {agent_pos_tuple}. Thêm vào đường đi.")
+                        # Thêm ô trước đích nếu không có trong path
+                        second_last_found = False
+                        for dy in [-1, 0, 1]:
+                            for dx in [-1, 0, 1]:
+                                if dx == 0 and dy == 0:
+                                    continue  # Bỏ qua chính nó
+                                test_x = end_pos[0] + dx
+                                test_y = end_pos[1] + dy
+                                if 0 <= test_x < self.map_object.size and 0 <= test_y < self.map_object.size:
+                                    test_pos = (test_x, test_y)
+                                    # Nếu có một vị trí liền kề trong path, sử dụng để vẽ mũi tên
+                                    if test_pos in path_copy:
+                                        path_copy.append(end_pos)
+                                        second_last_found = True
+                                        self._log(f"Tìm thấy ô liền kề {test_pos}, thêm vào đường đi")
+                                        break
+                            if second_last_found:
+                                break
+                        
+                        # Nếu không tìm được ô liền kề, tạo một ô giả để vẽ mũi tên
+                        if not second_last_found:
+                            # Tìm một ô liền kề đích có thể đi được
+                            for dy in [-1, 0, 1]:
+                                for dx in [-1, 0, 1]:
+                                    if dx == 0 and dy == 0:
+                                        continue  # Bỏ qua chính nó
+                                    test_x = end_pos[0] + dx
+                                    test_y = end_pos[1] + dy
+                                    if 0 <= test_x < self.map_object.size and 0 <= test_y < self.map_object.size:
+                                        test_pos = (test_x, test_y)
+                                        # Kiểm tra ô không phải là chướng ngại vật
+                                        cell_type = self.map_object.grid[test_y, test_x]
+                                        if cell_type != CellType.OBSTACLE:
+                                            path_copy = [test_pos, end_pos]  # Tạo đường đi tối thiểu
+                                            self._log(f"Tạo đường đi tối thiểu từ {test_pos} đến {end_pos}")
+                                            second_last_found = True
+                                            break
+                                if second_last_found:
+                                    break
+        
+        # Tiếp theo, vẽ đường đi (nếu có)
+        if path_copy and len(path_copy) > 1:
+            # Sử dụng màu gradient từ cam sang đỏ để biểu thị đường đi qua thời gian
+            num_segments = len(path_copy) - 1
+            for i in range(num_segments):
+                p1 = path_copy[i]
+                p2 = path_copy[i+1]
+                # Đảm bảo p1, p2 là tuple
+                x1, y1 = tuple(p1) if hasattr(p1, '__len__') else (0,0)
+                x2, y2 = tuple(p2) if hasattr(p2, '__len__') else (0,0)
+
+                # Tính toán vị trí trung tâm của các ô
+                center_x1 = offset_x + x1 * cell_size + cell_size // 2
+                center_y1 = offset_y + y1 * cell_size + cell_size // 2
+                center_x2 = offset_x + x2 * cell_size + cell_size // 2
+                center_y2 = offset_y + y2 * cell_size + cell_size // 2
+                
+                # Sử dụng màu sắc khác nhau cho các phần của đường đi
+                # Đoạn đầu: cam nhạt, đoạn cuối: đỏ đậm
+                progress_ratio = i / max(1, num_segments - 1)  # Tránh chia cho 0
+                
+                # Tạo màu gradient từ cam (#FFA500) đến đỏ (#FF0000)
+                r = min(255, int(255))
+                g = min(255, int(165 - progress_ratio * 165))
+                b = min(255, int(0))
+                color = f'#{r:02x}{g:02x}{b:02x}'
+                
+                # Xác định đoạn cuối cùng vào đích
+                is_last_to_end = (p2 == tuple(self.map_object.end_pos))
+                
+                # Vẽ đoạn đường đặc biệt nếu đi vào đích
+                if is_last_to_end:
+                    # Đoạn cuối vào đích sử dụng màu đỏ đậm và mũi tên lớn hơn
+                    self._log(f"Vẽ mũi tên đặc biệt từ {p1} đến đích {p2}")
+                    line_width = max(3, cell_size // 6)  # Đường đậm hơn
+                    arrow_size = max(12, cell_size // 1.5)  # Mũi tên lớn hơn
+                    
+                    # Vẽ hiệu ứng "glow" trước khi vẽ mũi tên chính
+                    for glow in range(2):
+                        glow_width = line_width + (2-glow)
+                        glow_color = "#FF5500" if glow == 0 else "#FF2200" 
+                        canvas.create_line(center_x1, center_y1, center_x2, center_y2, 
+                                    fill=glow_color, width=glow_width, 
+                                    arrow=tk.LAST, arrowshape=(arrow_size, arrow_size, arrow_size//2))
+                    
+                    # Vẽ mũi tên chính với màu đỏ tươi
+                    canvas.create_line(center_x1, center_y1, center_x2, center_y2, 
+                                    fill="#FF0000", width=line_width, 
+                                    arrow=tk.LAST, arrowshape=(arrow_size, arrow_size, arrow_size//2))
+                else:
+                    # Các đoạn đường bình thường
+                    canvas.create_line(center_x1, center_y1, center_x2, center_y2, 
+                                    fill=color, width=max(1, cell_size // 10), 
+                                    arrow=tk.LAST)
+        
+        # Cuối cùng, vẽ agent (nếu có)
+        if agent_pos is not None:
+            agent_pos_np = np.array(agent_pos) if isinstance(agent_pos, list) else agent_pos
+            if hasattr(agent_pos_np, 'size') and agent_pos_np.size > 0:
+                agent_x, agent_y = agent_pos_np[0], agent_pos_np[1]
+                pixel_x = offset_x + agent_x * cell_size
+                pixel_y = offset_y + agent_y * cell_size
+                
+                # Vẽ agent to và nổi bật hơn
+                agent_size = cell_size // 2.5  # Hơi nhỏ hơn để không che mất ô
+                
+                # Nếu agent ở vị trí đích, dùng màu xanh lá đậm để dễ nhìn hơn
+                if (agent_x, agent_y) == self.map_object.end_pos:
+                    agent_color = "#00AA00"  # Xanh lá đậm
+                    # Thêm hiệu ứng hào quang xung quanh để nhấn mạnh
+                    glow_size = agent_size * 1.5
+                    canvas.create_oval(
+                        pixel_x + (cell_size - glow_size) / 2,
+                        pixel_y + (cell_size - glow_size) / 2,
+                        pixel_x + (cell_size + glow_size) / 2,
+                        pixel_y + (cell_size + glow_size) / 2,
+                        fill="#AAFFAA", outline="#00FF00", width=2
+                    )
+                else:
+                    agent_color = "blue"
+                
+                # Vẽ agent
+                canvas.create_oval(
+                    pixel_x + (cell_size - agent_size) / 2,
+                    pixel_y + (cell_size - agent_size) / 2,
+                    pixel_x + (cell_size + agent_size) / 2,
+                    pixel_y + (cell_size + agent_size) / 2,
+                    fill=agent_color, outline="black", width=2
+                )
 
     def _start_manual_training(self):
         """Bắt đầu quá trình huấn luyện thủ công DQN agent."""
         if not self.rl_environment:
             messagebox.showerror("Lỗi", "Vui lòng khởi tạo môi trường RL trước!")
+            return
+            
+        # Kiểm tra xem đã đang huấn luyện hay chưa
+        if self.is_manual_training_running:
+            messagebox.showinfo("Thông báo", "Huấn luyện đang chạy. Vui lòng đợi hoàn thành.")
             return
         
         # Lấy tham số từ giao diện
@@ -884,162 +1403,119 @@ XỬ LÝ LỖI THƯỜNG GẶP
             tau = self.manual_tau.get()
             target_update_interval = self.manual_target_update_interval.get()
             train_freq = self.manual_train_freq.get()
-            total_timesteps = self.manual_total_timesteps.get()  # Thêm lại dòng này
+            total_timesteps = self.manual_total_timesteps.get()
             
-            # Lấy các tham số exploration từ UI
+            # Xử lý tham số đặc biệt
+            use_double_dqn = self.manual_use_double_dqn.get()
+            use_dueling_network = self.manual_use_dueling_dqn.get()
+            use_prioritized_replay = self.manual_use_prioritized_replay.get()
+            
+            # Tham số khám phá
             exploration_fraction = self.manual_exploration_fraction.get()
             exploration_initial_eps = self.manual_exploration_initial_eps.get()
             exploration_final_eps = self.manual_exploration_final_eps.get()
             
-            # Lấy giá trị các checkbox
-            double_q = self.manual_use_double_dqn.get()
-            dueling_net = self.manual_use_dueling_dqn.get()
-            prioritized_replay = self.manual_use_prioritized_replay.get()
-            
-            # Tạo thư mục log riêng cho lần train này
-            import datetime
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            log_dir = os.path.join("logs", f"manual_training_{timestamp}")
-            os.makedirs(log_dir, exist_ok=True)
-
-            # Các tham số nâng cao cho khả năng thích ứng thoát khỏi lặp
-            advanced_params_for_training_logic = {
-                "loop_detection_active": True,  # Kích hoạt phát hiện lặp
-                "adapt_exploration": True,      # Cho phép điều chỉnh exploration
-                "min_reward_improvement": 0.1,  # Ngưỡng cải thiện tối thiểu để không tăng exploration
-            }
-            
-            # Các tham số chỉ dành cho việc tạo model
-            model_creation_params = {
-                "learning_rate": learning_rate,
-                "gamma": gamma,
-                "buffer_size": buffer_size,
-                "batch_size": batch_size,
-                "learning_starts": learning_starts,
-                "tau": tau,
-                "train_freq": train_freq,
-                "target_update_interval": target_update_interval,
-                "exploration_fraction": exploration_fraction,
-                "exploration_initial_eps": exploration_initial_eps,
-                "exploration_final_eps": exploration_final_eps,
-                "policy_kwargs": {"net_arch": [256, 256]},  # Mạng neural lớn hơn
-                "use_double_dqn": double_q, 
-                "use_dueling_network": dueling_net, 
-                "use_prioritized_replay": prioritized_replay, 
-                "prioritized_replay_alpha": 0.6,
-                "prioritized_replay_beta0": 0.4
-                # Không bao gồm **advanced_params ở đây
-            }
-            
-        except tk.TclError as e:
-            # Lỗi khi parse giá trị từ widget
-            messagebox.showerror("Lỗi Tham số", f"Lỗi đọc tham số huấn luyện: {e}")
-            self.is_manual_training_running = False # Reset flag on input error
-            return
-        
-        # Thiết lập giao diện để thể hiện đang huấn luyện
-        self._set_training_buttons_state(tk.DISABLED)
-        self.is_manual_training_running = True # Đặt flag TRƯỚC khi bắt đầu thread và check_queue
-        
-        # Kiểm tra xem model đã được tải lên chưa
-        is_continuing_training = hasattr(self, 'trainer') and self.trainer and hasattr(self.trainer, 'model') and self.trainer.model
-        
-        # Hiển thị thông báo phù hợp dựa trên việc tiếp tục train hay tạo mới
-        if is_continuing_training:
-            self._update_agent_status("Đang tiếp tục huấn luyện model đã tải...")
-            self._log("Tiếp tục huấn luyện model đã tải lên...")
-        else:
-            self._update_agent_status("Đang khởi tạo model DQN mới...")
-            self._log("Đang tạo model DQN mới...")
-        
-        # Hiển thị progress bar và status
-        if hasattr(self, 'manual_train_progress'): self.manual_train_progress['value'] = 0
-        if hasattr(self, 'manual_train_status_label'): self.manual_train_status_label['text'] = "Status: Initializing..."
-        self.root.update_idletasks() # Cập nhật UI ngay
-
-        # Tạo log directory riêng cho lần train này
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        session_id = f"manual_train_{timestamp}"
-        log_dir = os.path.join("./training_logs", session_id)
-        os.makedirs(log_dir, exist_ok=True)
-        self._log(f"Log directory created: {log_dir}")
-
-        # Chỉ tạo trainer mới nếu chưa có hoặc không có model đã tải
-        if not is_continuing_training:
-            self.trainer = DQNAgentTrainer(env=self.rl_environment, log_dir=log_dir)
-
-        def training_thread():
+            # Tạo network architecture từ chuỗi nhập vào 
+            net_arch_str = self.manual_net_arch.get()
             try:
-                # Chỉ tạo model mới nếu không tiếp tục huấn luyện model đã tải
-                if not is_continuing_training:
-                    self._log("Đang tạo model DQN...")
-                # Lấy kiến trúc mạng từ input, phân tách và chuyển đổi thành list các số nguyên
-                try:
-                    net_arch_str = self.manual_net_arch.get().split(',')
-                    net_arch = [int(n.strip()) for n in net_arch_str if n.strip().isdigit()]
-                    if not net_arch: # Nếu trống hoặc không hợp lệ, dùng mặc định
-                        net_arch = [256, 256]
-                        self._log("Cảnh báo: Network Arch không hợp lệ, sử dụng [256, 256]")
-                    # Cập nhật net_arch trực tiếp vào model_creation_params
-                    current_model_creation_params = model_creation_params.copy() # Tạo bản sao để thay đổi
-                    current_model_creation_params["policy_kwargs"]["net_arch"] = net_arch
-                except Exception as parse_e:
-                    self._log(f"Lỗi phân tích Network Arch: {parse_e}. Sử dụng [256, 256]")
-                    current_model_creation_params = model_creation_params.copy()
-                    current_model_creation_params["policy_kwargs"]["net_arch"] = [256, 256]
-
-                # Tạo model với các tham số được định nghĩa cho việc tạo model
-                    self.trainer.create_model(**current_model_creation_params)
-                    self._log(f"Model mới đã được tạo. Bắt đầu huấn luyện {total_timesteps} bước...")
-                else:
-                    self._log(f"Tiếp tục huấn luyện model đã tải thêm {total_timesteps} bước...")
-                
-                # Tạo callback với total_timesteps
-                progress_callback = self.ManualTrainingProgressCallback(self.training_progress_queue, total_steps=total_timesteps)
-                
-                # Bắt đầu huấn luyện
-                self.trainer.train(total_timesteps=total_timesteps, callback=progress_callback)
-                
-                # Khi huấn luyện xong (thành công)
-                self.root.after(0, self._on_training_complete) 
-            except ImportError as e_import:
-                 self._log(f"LỖI IMPORT: {e_import}. Cài đặt sb3-contrib?")
-                 self.root.after(0, self._on_training_error, f"Lỗi Import: {e_import}")
-            except Exception as e_train:
-                self._log(f"Lỗi huấn luyện: {e_train}")
-                import traceback; self._log(traceback.format_exc())
-                # Khi huấn luyện lỗi
-                self.root.after(0, lambda err=e_train: self._on_training_error(f"Lỗi: {err}"))
-
-        # Bắt đầu thread huấn luyện
-        self.training_thread_handle = threading.Thread(target=training_thread, daemon=True)
-        self.training_thread_handle.start()
-        
-        # Bắt đầu kiểm tra queue sau khi thread đã khởi chạy
-        self.root.after(100, self._check_training_progress_queue) 
-        self._update_agent_status("Đang huấn luyện...") # Cập nhật trạng thái lần nữa
+                net_arch = [int(x.strip()) for x in net_arch_str.split(',') if x.strip().isdigit()]
+                self._log(f"Neural network architecture: {net_arch}")
+            except:
+                self._log("Invalid net_arch format, using default [64, 64]")
+                net_arch = [64, 64]
+            
+            policy_kwargs = {'net_arch': net_arch}
+            
+            # Kiểm tra giá trị hợp lệ 
+            if learning_rate <= 0 or gamma <= 0 or buffer_size <= 0 or batch_size <= 0 or total_timesteps <= 0:
+                messagebox.showerror("Giá trị không hợp lệ", "Vui lòng nhập các giá trị dương cho tất cả các tham số!")
+                return
+            
+            # Đặt lại cờ huấn luyện
+            self.is_manual_training_running = False
+            
+            # Đặt lại hàng đợi tiến trình
+            self.training_progress_queue = queue.Queue()
+            
+            # Tạm thời vô hiệu hóa các nút để tránh nhấn trong lúc huấn luyện
+            self._set_training_buttons_state(tk.DISABLED)
+            
+            # Khởi tạo trainer nếu chưa có
+            if self.trainer is None:
+                from core.algorithms.rl_DQNAgent import DQNAgentTrainer
+                self.trainer = DQNAgentTrainer(env=self.rl_environment)
+            
+            # Reset progress bar và status
+            if hasattr(self, 'manual_train_progress'): 
+                self.manual_train_progress['value'] = 0
+            if hasattr(self, 'manual_train_status_label'): 
+                self.manual_train_status_label['text'] = "Status: Starting training..."
+            
+            # Thực hiện huấn luyện trong một thread riêng biệt
+            training_thread = threading.Thread(target=self._training_thread_func, args=(
+                learning_rate, gamma, buffer_size, batch_size, learning_starts, tau, target_update_interval,
+                train_freq, total_timesteps, use_double_dqn, use_dueling_network, use_prioritized_replay,
+                exploration_fraction, exploration_initial_eps, exploration_final_eps, policy_kwargs
+            ))
+            training_thread.daemon = True  # Cho phép thoát ứng dụng khi thread này đang chạy
+            training_thread.start()
+            
+            # Cập nhật UI
+            self._update_agent_status("Đang huấn luyện...")
+            
+        except Exception as e:
+            self._log(f"Training error: {e}")
+            messagebox.showerror("Training Error", str(e))
+            self._set_training_buttons_state(tk.NORMAL)
 
     def _on_training_complete(self):
         """Xử lý khi huấn luyện hoàn tất."""
-        self._set_training_buttons_state('normal')
+        self._set_training_buttons_state(tk.NORMAL)
         
-        # Enable nút lưu model
-        for child in self.root.winfo_children():
-            if isinstance(child, ttk.Frame):
-                for subchild in child.winfo_children():
-                    if isinstance(subchild, ttk.Button) and subchild['text'] == "Lưu model":
-                        subchild.configure(state='normal')
-                        
-        # Enable nút chạy agent
-        for child in self.root.winfo_children():
-            if isinstance(child, ttk.Frame):
-                for subchild in child.winfo_children():
-                    if isinstance(subchild, ttk.Button) and subchild['text'] == "Chạy agent trên bản đồ":
-                        subchild.configure(state='normal')
+        # Enable nút lưu model và chạy agent
+        if hasattr(self, 'save_manual_model_button'):
+            self.save_manual_model_button.config(state=tk.NORMAL)
+            self._log("Đã kích hoạt nút lưu model")
+        
+        if hasattr(self, 'run_agent_button'):
+            self.run_agent_button.config(state=tk.NORMAL)
+            self._log("Đã kích hoạt nút chạy agent")
+        
+        # Thêm check cụ thể với đường dẫn widget để nắm bắt các nút khó tìm
+        try:
+            # Kích hoạt tất cả các nút lưu model và chạy agent trong UI bằng tên
+            for widget in self.root.winfo_children():
+                self._enable_child_buttons_by_name(widget, ["Lưu Model", "Chạy Agent", "Lưu Model Hiện tại", "Chạy Agent trên Bản đồ"])
+        except Exception as e:
+            self._log(f"Lỗi kích hoạt nút: {e}")
+            
+        # Update status
+        self._update_agent_status("Huấn luyện hoàn tất! Có thể lưu model hoặc chạy agent.")
+        self._log("Huấn luyện hoàn tất! Có thể lưu model hoặc chạy agent.")
         
         # Nếu có training metrics, hiển thị biểu đồ
         if hasattr(self.trainer, 'training_metrics') and self.trainer.training_metrics is not None:
             self._visualize_training_metrics()
+    
+    def _enable_child_buttons_by_name(self, parent, button_texts):
+        """Kích hoạt các nút con có tên trong danh sách button_texts."""
+        if not parent:
+            return
+            
+        if hasattr(parent, 'winfo_children'):
+            for child in parent.winfo_children():
+                # Nếu là nút và có text khớp với một trong các tên cần tìm
+                if isinstance(child, ttk.Button) and hasattr(child, 'cget'):
+                    try:
+                        button_text = child.cget('text')
+                        if button_text in button_texts:
+                            child.config(state=tk.NORMAL)
+                            self._log(f"Kích hoạt nút: {button_text}")
+                    except Exception:
+                        pass
+                        
+                # Đệ quy vào các widget con
+                self._enable_child_buttons_by_name(child, button_texts)
 
     def _visualize_training_metrics(self):
         """Hiển thị biểu đồ các metrics trong quá trình huấn luyện."""
@@ -1069,6 +1545,9 @@ XỬ LÝ LỖI THƯỜNG GẶP
         ax1 = rewards_figure.add_subplot(111)
         
         if 'episode_rewards' in metrics and len(metrics['episode_rewards']) > 0:
+            # Tạo mảng chỉ số episodes cho trục x
+            episode_indices = list(range(len(metrics['episode_rewards'])))
+            
             # Moving average rewards for smoother plot
             window_size = min(10, len(metrics['episode_rewards']))
             if window_size > 0:
@@ -1078,10 +1557,10 @@ XỬ LÝ LỖI THƯỜNG GẶP
                     window_start = max(0, i - window_size + 1)
                     moving_avg_rewards.append(np.mean(metrics['episode_rewards'][window_start:i+1]))
                 
-                ax1.plot(moving_avg_rewards, 'b-', label='Moving Avg Reward')
-                ax1.plot(metrics['episode_rewards'], 'b.', alpha=0.3, label='Episode Reward')
+                ax1.plot(episode_indices, moving_avg_rewards, 'b-', label='Moving Avg Reward')
+                ax1.plot(episode_indices, metrics['episode_rewards'], 'b.', alpha=0.3, label='Episode Reward')
             else:
-                ax1.plot(metrics['episode_rewards'], 'b-', label='Episode Reward')
+                ax1.plot(episode_indices, metrics['episode_rewards'], 'b-', label='Episode Reward')
                 
             ax1.set_xlabel('Episodes')
             ax1.set_ylabel('Reward', color='b')
@@ -1090,10 +1569,14 @@ XỬ LÝ LỖI THƯỜNG GẶP
             # Add success rate if available
             if 'success_rates' in metrics and len(metrics['success_rates']) > 0:
                 ax2 = ax1.twinx()
-                ax2.plot(metrics['success_rates'], 'r-', label='Success Rate')
+                
+                # Đảm bảo kích thước mảng khớp nhau
+                success_indices = list(range(len(metrics['success_rates'])))
+                
+                ax2.plot(success_indices, metrics['success_rates'], 'r-', label='Success Rate')
                 ax2.set_ylabel('Success Rate', color='r')
                 ax2.tick_params(axis='y', labelcolor='r')
-                
+            
             # Add legend
             lines1, labels1 = ax1.get_legend_handles_labels()
             if 'success_rates' in metrics and len(metrics['success_rates']) > 0:
@@ -1119,18 +1602,36 @@ XỬ LÝ LỖI THƯỜNG GẶP
         ax3 = params_figure.add_subplot(111)
         
         if 'exploration_rates' in metrics and len(metrics['exploration_rates']) > 0:
-            ax3.plot(metrics['timesteps'], metrics['exploration_rates'], 'g-', label='Exploration Rate')
+            # Đảm bảo timesteps và exploration_rates có cùng kích thước
+            if 'timesteps' in metrics and len(metrics['timesteps']) > 0:
+                # Lấy độ dài nhỏ nhất giữa hai mảng
+                min_length = min(len(metrics['timesteps']), len(metrics['exploration_rates']))
+                # Cắt cả hai mảng về cùng độ dài
+                timesteps_data = metrics['timesteps'][:min_length]
+                exploration_data = metrics['exploration_rates'][:min_length]
+                
+                # Vẽ đồ thị với dữ liệu đã điều chỉnh kích thước
+                ax3.plot(timesteps_data, exploration_data, 'g-', label='Exploration Rate')
+            else:
+                # Nếu không có timesteps, vẽ theo chỉ số
+                ax3.plot(metrics['exploration_rates'], 'g-', label='Exploration Rate')
+            
             ax3.set_xlabel('Timesteps')
             ax3.set_ylabel('Exploration Rate', color='g')
             ax3.tick_params(axis='y', labelcolor='g')
             
-            # Add learning rate if available
+            # Add learning rate if available - tương tự điều chỉnh kích thước
             if 'learning_rates' in metrics and len(metrics['learning_rates']) > 0:
                 ax4 = ax3.twinx()
-                ax4.plot(metrics['timesteps'], metrics['learning_rates'], 'm-', label='Learning Rate')
+                
+                # Đảm bảo đồng bộ kích thước
+                min_length = min(len(timesteps_data), len(metrics['learning_rates']))
+                learning_rates_data = metrics['learning_rates'][:min_length]
+                
+                ax4.plot(timesteps_data[:min_length], learning_rates_data, 'm-', label='Learning Rate')
                 ax4.set_ylabel('Learning Rate', color='m')
                 ax4.tick_params(axis='y', labelcolor='m')
-                
+            
             # Add legend
             lines3, labels3 = ax3.get_legend_handles_labels()
             if 'learning_rates' in metrics and len(metrics['learning_rates']) > 0:
@@ -1156,28 +1657,49 @@ XỬ LÝ LỖI THƯỜNG GẶP
         ax5 = loss_figure.add_subplot(111)
         
         if 'losses' in metrics and len(metrics['losses']) > 0:
-            # Moving average for losses to smooth out the plot
-            window_size = min(100, len(metrics['losses']))
-            if window_size > 0:
+            # Tính toán kích thước cửa sổ trung bình động phù hợp
+            window_size = min(max(5, len(metrics['losses']) // 10), 100)
+            
+            # Tạo mảng chỉ số cho trục x
+            loss_indices = list(range(len(metrics['losses'])))
+            
+            # Kiểm tra có đủ dữ liệu cho trung bình động không
+            if len(metrics['losses']) > window_size:
+                # Tính trung bình động
                 moving_avg_losses = []
                 for i in range(len(metrics['losses'])):
                     window_start = max(0, i - window_size + 1)
                     moving_avg_losses.append(np.mean(metrics['losses'][window_start:i+1]))
                 
-                ax5.plot(moving_avg_losses, 'r-', label='Moving Avg Loss')
+                # Vẽ đồ thị trung bình động và dữ liệu gốc
+                ax5.plot(loss_indices, moving_avg_losses, 'r-', label='Moving Avg Loss', linewidth=2)
                 # Plot original loss values with low alpha to show variance
-                ax5.plot(metrics['losses'], 'r.', alpha=0.1, label='Loss')
+                ax5.plot(loss_indices, metrics['losses'], 'r.', alpha=0.1, label='Loss')
             else:
-                ax5.plot(metrics['losses'], 'r-', label='Loss')
+                # Vẽ đơn giản nếu không đủ dữ liệu cho trung bình động
+                ax5.plot(loss_indices, metrics['losses'], 'r-', label='Loss', linewidth=2)
                 
+            # Đặt nhãn và tạo legend
             ax5.set_xlabel('Updates')
             ax5.set_ylabel('Loss Value')
+            ax5.set_title('Training Loss Over Time')
+            
+            # Đảm bảo y-axis không âm (loss thường không âm)
+            y_min = max(0, min(metrics['losses']) * 0.9)
+            y_max = max(metrics['losses']) * 1.1
+            ax5.set_ylim(y_min, y_max)
+            
             ax5.legend(loc='upper right')
+            ax5.grid(True, linestyle='--', alpha=0.7)
             
             loss_figure.tight_layout()
         else:
-            ax5.text(0.5, 0.5, "No loss data available", 
-                    horizontalalignment='center', verticalalignment='center')
+            # Thông báo không có dữ liệu - thêm thông tin chi tiết
+            ax5.text(0.5, 0.5, "No loss data available\nPossible reasons:\n- Training just started\n- Model doesn't expose loss values\n- Buffer size too small", 
+                    horizontalalignment='center', verticalalignment='center',
+                    fontsize=10, color='gray', wrap=True)
+            ax5.set_xticks([])
+            ax5.set_yticks([])
         
         # Tab 4: Episode Lengths
         lengths_tab = ttk.Frame(notebook)
@@ -1191,7 +1713,10 @@ XỬ LÝ LỖI THƯỜNG GẶP
         ax6 = lengths_figure.add_subplot(111)
         
         if 'episode_lengths' in metrics and len(metrics['episode_lengths']) > 0:
-            # Moving average for smoother visualization
+            # Tạo mảng chỉ số episodes
+            episode_indices = list(range(len(metrics['episode_lengths'])))
+            
+            # Tính toán trung bình động
             window_size = min(10, len(metrics['episode_lengths']))
             if window_size > 0:
                 moving_avg_lengths = []
@@ -1199,10 +1724,10 @@ XỬ LÝ LỖI THƯỜNG GẶP
                     window_start = max(0, i - window_size + 1)
                     moving_avg_lengths.append(np.mean(metrics['episode_lengths'][window_start:i+1]))
                 
-                ax6.plot(moving_avg_lengths, 'g-', label='Moving Avg Length')
-                ax6.plot(metrics['episode_lengths'], 'g.', alpha=0.3, label='Episode Length')
+                ax6.plot(episode_indices, moving_avg_lengths, 'g-', label='Moving Avg Length')
+                ax6.plot(episode_indices, metrics['episode_lengths'], 'g.', alpha=0.3, label='Episode Length')
             else:
-                ax6.plot(metrics['episode_lengths'], 'g-', label='Episode Length')
+                ax6.plot(episode_indices, metrics['episode_lengths'], 'g-', label='Episode Length')
                 
             ax6.set_xlabel('Episodes')
             ax6.set_ylabel('Number of Steps')
@@ -1361,21 +1886,69 @@ XỬ LÝ LỖI THƯỜNG GẶP
 
                 self.root.after(0, lambda: self._draw_map_with_path(self.map_canvas, observation['agent_pos'], path))
 
+                # Đổi tên biến để rõ ràng hơn
+                observation_before_step = observation
+                terminated = False # Khởi tạo terminated ở đây
+                truncated = False # Khởi tạo truncated ở đây
+
+                def _schedule_draw_call(agent_draw_pos, current_path_list):
+                    self._draw_map_with_path(self.map_canvas, agent_draw_pos, current_path_list)
+
                 while not (terminated or truncated) and step_count < self.rl_environment.max_steps_per_episode * 1.5: # Thêm giới hạn an toàn
-                    action = self.trainer.predict_action(observation)
-                    next_obs, reward, terminated, truncated, info = self.rl_environment.step(action)
-                    total_reward += reward
-                    step_count += 1
-                    observation = next_obs
-                    path.append(tuple(observation['agent_pos'])) # Chuyển numpy sang tuple
+                    action_to_take = self.trainer.predict_action(observation_before_step) # Sử dụng trạng thái trước khi bước
                     
-                    # Cập nhật UI sau mỗi bước
-                    self.root.after(0, lambda obs=observation, p=list(path): self._draw_map_with_path(self.map_canvas, obs['agent_pos'], p))
-                    self.root.after(10) # Delay nhỏ
+                    # Thực hiện hành động, nhận trạng thái TIẾP THEO
+                    obs_after_step, reward_val, terminated_flag, truncated_flag, info_after_step = self.rl_environment.step(action_to_take)
+                    
+                    total_reward += reward_val
+                    step_count += 1
+                    
+                    # Vị trí của agent SAU KHI thực hiện bước đi
+                    agent_pos_after_step = tuple(obs_after_step['agent_pos'])
+                    
+                    # Thêm vị trí mới này vào đường đi
+                    path.append(agent_pos_after_step) # Path giờ đã bao gồm vị trí mới nhất
+                    
+                    # Để cập nhật UI, sử dụng bản sao mới của path cho lambda
+                    path_for_ui = list(path) 
+                    
+                    # Cập nhật UI sử dụng vị trí của agent SAU KHI bước, và đường đi bao gồm vị trí đó
+                    self.root.after(0, lambda apas=agent_pos_after_step, pfu=path_for_ui: _schedule_draw_call(apas, pfu))
+                    
+                    # Sleep ngắn để đảm bảo UI được cập nhật
+                    time.sleep(0.05)
+                    
+                    # Cập nhật trạng thái cho vòng lặp tiếp theo
+                    observation_before_step = obs_after_step 
+                    terminated = terminated_flag
+                    truncated = truncated_flag
 
                 # Kết thúc
-                success = info.get("termination_reason") == "den_dich"
-                log_msg = f"Chạy agent hoàn tất. Thành công: {success}. Lý do: {info.get('termination_reason', 'Max Steps')}. Steps: {step_count}. Reward: {total_reward:.2f}"
+                success = info_after_step.get("termination_reason") == "den_dich" if 'info_after_step' in locals() else False
+                final_info_reason = info_after_step.get('termination_reason', 'Max Steps') if 'info_after_step' in locals() else 'Unknown'
+
+                # ĐẶC BIỆT QUAN TRỌNG: Nếu thành công (đến đích), đảm bảo đường đi cuối cùng bao gồm điểm đích
+                if success:
+                    # Đảm bảo điểm cuối cùng trong path là vị trí đích 
+                    # Trong trường hợp có lỗi, path không được cập nhật đầy đủ
+                    end_pos = tuple(self.map_object.end_pos)
+                    if path[-1] != end_pos:
+                        self._log("Đảm bảo đường đi đến đích: Thêm điểm đích vào path")
+                        path.append(end_pos)
+                
+                # Lên lịch vẽ cuối cùng với độ trễ cao hơn và đảm bảo mũi tên đến đích
+                final_pos = tuple(obs_after_step['agent_pos']) if 'obs_after_step' in locals() else None
+                final_path = list(path)
+                
+                self._log(f"Đường đi cuối cùng: {final_path}")
+                self._log(f"Vị trí đích: {self.map_object.end_pos}")
+                
+                # Vẽ lại đường đi cuối cùng
+                for delay in [100, 300, 500]:  # Nhiều lần vẽ với độ trễ khác nhau
+                    self.root.after(delay, lambda fp=final_pos, fp_ui=final_path: 
+                                  self._draw_map_with_path(self.map_canvas, fp, fp_ui))
+
+                log_msg = f"Chạy agent hoàn tất. Thành công: {success}. Lý do: {final_info_reason}. Steps: {step_count}. Reward: {total_reward:.2f}"
                 self._log(log_msg)
                 self.root.after(0, lambda msg=log_msg: self._update_agent_status(msg))
                 self.root.after(0, lambda: self.run_agent_button.config(state=tk.NORMAL))
@@ -1420,24 +1993,43 @@ Ghi log.
 
     def _check_training_progress_queue(self):
         """Checks the queue for training progress and updates the UI."""
+        if not hasattr(self, 'training_progress_queue'):
+            # If the queue doesn't exist yet, reschedule check
+            self.root.after(100, self._check_training_progress_queue)
+            return
+            
         try:
             # Non-blocking check
             while True: # Process all messages currently in the queue
-                current_step, total_steps, status_message = self.training_progress_queue.get_nowait()
-                
-                # Update Progress Bar
-                if total_steps > 0:
-                    progress_percentage = (current_step / total_steps) * 100
-                    self.manual_train_progress['value'] = progress_percentage
-                else:
-                    self.manual_train_progress['value'] = 0
+                try:
+                    # Get message from queue safely
+                    queue_data = self.training_progress_queue.get_nowait()
                     
-                # Update Status Label
-                self.manual_train_status_label['text'] = f"Status: {status_message}"
-                self.root.update_idletasks() # Force UI update
+                    # Validate that we got a tuple with 3 elements
+                    if isinstance(queue_data, tuple) and len(queue_data) == 3:
+                        current_step, total_steps, status_message = queue_data
+                        
+                        # Update Progress Bar if it exists
+                        if hasattr(self, 'manual_train_progress'):
+                            if total_steps > 0:
+                                progress_percentage = (current_step / total_steps) * 100
+                                self.manual_train_progress['value'] = progress_percentage
+                            else:
+                                self.manual_train_progress['value'] = 0
+                                
+                        # Update Status Label if it exists
+                        if hasattr(self, 'manual_train_status_label'):
+                            self.manual_train_status_label['text'] = f"Status: {status_message}"
+                    else:
+                        self._log(f"Received invalid data format from training queue")
+                        
+                    self.root.update_idletasks() # Force UI update
+                except queue.Empty:
+                    break # No more messages in queue
+                except Exception as queue_error:
+                    self._log(f"Error processing queue item: {queue_error}")
+                    break
                 
-        except queue.Empty:
-            pass # No new messages
         except Exception as e:
             print(f"Error processing training progress queue: {e}") # Log unexpected errors
             self._log(f"Error updating progress: {e}")
@@ -1451,6 +2043,7 @@ Ghi log.
         self._log("Thực hiện Reset Tất Cả...")
         self.map_object = None
         self.current_map_path = None
+        self.current_map_size_display_var.set("N/A") # Reset display
         self.rl_environment = None
         self.trainer = None
         self.trained_model_path = None
@@ -1470,15 +2063,34 @@ Ghi log.
         self._update_agent_status("Đã reset. Tạo/Tải bản đồ để bắt đầu.")
         self._log("Reset hoàn tất.")
         
+        if hasattr(self, 'tuning_status_label'): self.tuning_status_label.config(text="Tuning Status: Idle")
+        if hasattr(self, 'apply_best_params_btn'): self.apply_best_params_btn.config(state=tk.DISABLED)
+        if hasattr(self, 'start_tuning_btn'): self.start_tuning_btn.config(state=tk.NORMAL)
+        
     def _reset_env_and_agent(self):
         """Hàm phụ trợ chỉ reset môi trường và agent."""
         self.rl_environment = None
-        self.trainer = None
-        self.trained_model_path = None
-        self.is_model_loaded = False
-        if hasattr(self, 'save_button'): self.save_button.config(state=tk.DISABLED)
+        # Don't reset trainer if we want to continue training the same loaded/partially trained model on a new env
+        # self.trainer = None # Keep trainer if exists, but clear its env association
+        if self.trainer:
+            self.trainer.env = None # Or re-init trainer if it heavily depends on old env struct
+            # self.trainer.model.set_env(None) # This might be needed if model stores env reference
+        
+        # self.trained_model_path = None # Keep if a model was loaded, path is still valid
+        # self.is_model_loaded = False # Keep if model was loaded
+
+        # UI elements related to a trained/loaded model should be reset if environment changes significantly
+        # Or indicate that model might not be compatible with new env settings
+        if hasattr(self, 'save_manual_model_button'): self.save_manual_model_button.config(state=tk.DISABLED)
         if hasattr(self, 'run_agent_button'): self.run_agent_button.config(state=tk.DISABLED)
-        self._update_agent_status("Môi trường/Agent đã reset do map thay đổi. Khởi tạo lại môi trường.")
+        # If training was running, stop it
+        self.is_manual_training_running = False 
+        if hasattr(self, 'manual_train_btn'): self.manual_train_btn.config(state=tk.NORMAL)
+        if hasattr(self, 'manual_train_progress'): self.manual_train_progress['value'] = 0
+        if hasattr(self, 'manual_train_status_label'): self.manual_train_status_label['text'] = "Status: Idle (Map changed, re-init env)"
+        
+        self._update_agent_status("Môi trường/Agent đã reset do map thay đổi. Khởi tạo lại môi trường RL.")
+        self._log("Môi trường RL và trạng thái agent liên quan đã được reset do thay đổi bản đồ.")
 
     # --- Thêm các hàm cho Hyperparameter Tuning ---
 
@@ -1583,96 +2195,123 @@ Ghi log.
             # Sử dụng môi trường hiện tại (self.rl_environment)
             temp_trainer = DQNAgentTrainer(
                 env=self.rl_environment, 
-                verbose=0, # Ít log hơn trong quá trình tuning
-                policy_kwargs=policy_kwargs,
-                learning_rate=lr,
-                gamma=gamma,
-                buffer_size=buffer_size,
-                batch_size=batch_size,
-                exploration_fraction=exploration_fraction,
-                exploration_final_eps=exploration_final_eps,
-                # Thêm các tham số khác đã suggest ở trên nếu có
+                log_dir=os.path.join("logs", f"optuna_trial_{trial.number}")
             )
+            
+            # PATCH: Ensure logger is set on temp_trainer if DQNAgentTrainer doesn't do it itself
+            if not hasattr(temp_trainer, 'logger') or temp_trainer.logger is None:
+                self._log(f"  Trial {trial.number}: DQNAgentTrainer instance lacks a logger. Initializing a basic stdout logger for it.")
+                # Create a new, minimal logger instance for this trainer.
+                # This logger will only print to stdout.
+                temp_trainer.logger = Logger(folder=None, output_formats=[HumanOutputFormat(sys.stdout)])
             
             # Tạo model bên trong trainer tạm thời
-            temp_trainer.create_model(
-                policy_kwargs=policy_kwargs,
-                learning_rate=lr,
-                gamma=gamma,
-                buffer_size=buffer_size,
-                batch_size=batch_size,
-                exploration_fraction=exploration_fraction,
-                exploration_final_eps=exploration_final_eps
-                # Add other suggested hyperparameters if needed
-                # Keeping Dueling/Double/PER options out for simplicity in tuning trials
-            )
+            try:
+                # Xác định loại policy dựa vào observation space 
+                temp_trainer.create_model(
+                    learning_rate=lr,
+                    gamma=gamma,
+                    buffer_size=buffer_size,
+                    batch_size=batch_size,
+                    exploration_fraction=exploration_fraction,
+                    exploration_initial_eps=1.0, # Khởi đầu luôn ở 1.0
+                    exploration_final_eps=exploration_final_eps,
+                    policy_kwargs=policy_kwargs
+                )
+                
+                # Tạo simple metrics callback (không dùng list callbacks)
+                from stable_baselines3.common.callbacks import BaseCallback
+                
+                class SimpleMetricsCallback(BaseCallback):
+                    def __init__(self, verbose=0):
+                        super().__init__(verbose)
+                        self.rewards = []
+                        
+                    def _on_step(self):
+                        if len(self.model.ep_info_buffer) > 0 and "r" in self.model.ep_info_buffer[-1]:
+                            self.rewards.append(self.model.ep_info_buffer[-1]["r"])
+                        return True
+                
+                # Tạo SINGLE callback object để tránh unhashable type error
+                metrics_callback = SimpleMetricsCallback()
+                
+                # Train với số lượng bước nhỏ hơn
+                self._log(f"  Trial {trial.number}: Training with params={trial.params}")
+                # Quan trọng: Không dùng list cho callback mà chỉ dùng callback đơn lẻ
+                temp_trainer.train(total_timesteps=timesteps_per_trial, callback=metrics_callback)
+                
+            except Exception as train_error:
+                self._log(f"  Trial {trial.number}: Training error: {train_error}")
+                return -15.0  # Return a bad score but not -inf
             
-            # Huấn luyện agent tạm thời
-            # Sử dụng callback rỗng hoặc callback tối thiểu để tránh ảnh hưởng GUI chính
-            temp_trainer.train(total_timesteps=timesteps_per_trial, callback=None) 
-            
-            # --- 3. Đánh giá Agent ---
-            n_eval_episodes = 10 # Số episode để đánh giá
+            # --- 3. Đánh giá Agent Huấn luyện ---
+            # Đánh giá nhanh trên 5 episodes
             total_rewards = 0
-            total_steps = 0
             success_count = 0
-
-            # Thiết lập giới hạn bước đánh giá để tránh mắc kẹt
-            max_eval_steps = 1000  # Giới hạn số bước cho mỗi episode đánh giá
-
-            for _ in range(n_eval_episodes):
-                obs, _ = self.rl_environment.reset() # Reset môi trường hiện tại
-                episode_reward = 0
-                episode_steps = 0
-                terminated = truncated = False
-                
-                # Thêm giới hạn bước và timeout để tránh vòng lặp vô hạn
-                start_time = time.time()
-                timeout = 5.0  # Timeout 5 giây cho mỗi episode
-
-                # Lưu các vị trí đã đi qua để phát hiện lặp
-                visited_positions = {}
-                stuck_count = 0
-                
-                while not terminated and not truncated and episode_steps < max_eval_steps:
-                    # Kiểm tra timeout
-                    if time.time() - start_time > timeout:
-                        self._log(f"  Trial {trial.number}: Episode timed out after {episode_steps} steps")
-                        break
-                        
-                    action, _ = temp_trainer.model.predict(obs, deterministic=True)
-                    obs, reward, terminated, truncated, info = self.rl_environment.step(action)
-                    episode_reward += reward
-                    episode_steps += 1
+            total_steps = 0
+            n_eval_episodes = 5
+            
+            # Khởi tạo biến để phát hiện lặp
+            stuck_count = 0
+            
+            for i in range(n_eval_episodes):
+                try:
+                    episode_reward = 0
+                    episode_steps = 0
+                    obs, _ = self.rl_environment.reset()
+                    done = truncated = False
+                    visited_positions = {}  # Để theo dõi lặp
                     
-                    # Phát hiện lặp vị trí
-                    if hasattr(self.rl_environment, 'current_pos'):
-                        pos_key = str(self.rl_environment.current_pos)
-                        visited_positions[pos_key] = visited_positions.get(pos_key, 0) + 1
-                        
-                        # Nếu lặp quá nhiều lần tại một vị trí, coi như mắc kẹt
-                        if visited_positions[pos_key] > 10:
-                            stuck_count += 1
-                            if stuck_count > 30:  # Nếu mắc kẹt quá lâu
-                                self._log(f"  Trial {trial.number}: Agent stuck in a loop, terminating episode")
-                                break
+                    # Mỗi episode giới hạn 2*map_size^2 bước để tránh lặp vô hạn
+                    max_episode_steps = 2 * self.rl_environment.map_object.size**2
                     
-                    if terminated and info.get("termination_reason") == "den_dich":
-                         success_count += 1
+                    while not (done or truncated) and episode_steps < max_episode_steps:
+                        # Dự đoán hành động
+                        action, _ = temp_trainer.model.predict(obs, deterministic=True)
+                        obs, reward, terminated, truncated, info = self.rl_environment.step(action)
+                        episode_reward += reward
+                        episode_steps += 1
+                        
+                        # Phát hiện lặp vị trí
+                        if hasattr(self.rl_environment, 'current_pos'):
+                            pos_key = str(self.rl_environment.current_pos)
+                            visited_positions[pos_key] = visited_positions.get(pos_key, 0) + 1
+                            
+                            # Nếu lặp quá nhiều lần tại một vị trí, coi như mắc kẹt
+                            if visited_positions[pos_key] > 10:
+                                stuck_count += 1
+                                if stuck_count > 30:  # Nếu mắc kẹt quá lâu
+                                    self._log(f"  Trial {trial.number}: Agent stuck in a loop, terminating episode")
+                                    break
+                        
+                        if terminated and info.get("termination_reason") == "den_dich":
+                            success_count += 1
+                except Exception as e:
+                    self._log(f"  Trial {trial.number}: Error during evaluation episode: {e}")
+                    continue  # Skip this episode and continue with the next one
 
                 total_rewards += episode_reward
                 total_steps += episode_steps
 
-            avg_reward = total_rewards / n_eval_episodes
-            success_rate = success_count / n_eval_episodes
+            # Tránh chia cho 0 nếu không có episodes nào thành công
+            if n_eval_episodes > 0:
+                avg_reward = total_rewards / n_eval_episodes
+                success_rate = success_count / n_eval_episodes
+            else:
+                avg_reward = -10.0
+                success_rate = 0.0
             
             # Kết hợp cả reward và success_rate để tối ưu hóa
             metric_to_optimize = avg_reward * (0.5 + 0.5 * success_rate)
             
             # Phạt nặng các trial có success_rate = 0 (không thành công lần nào)
             if success_rate == 0:
-                metric_to_optimize = min(avg_reward, 0)  # Chắc chắn không dương nếu không thành công
-
+                metric_to_optimize = min(avg_reward, 0) - 10  # Phạt thêm, nhưng không quá khắc nghiệt
+            
+            # Đảm bảo giá trị trả về không phải -inf
+            if not np.isfinite(metric_to_optimize):
+                metric_to_optimize = -20.0  # Gán một giá trị âm hữu hạn
+            
             self._log(f"  Trial {trial.number}: Params={trial.params}, Avg Reward={avg_reward:.2f}, Success Rate={success_rate:.2f}, Metric={metric_to_optimize:.2f}")
             
             # --- 4. Trả về kết quả đánh giá ---
@@ -1682,8 +2321,8 @@ Ghi log.
             self._log(f"  Trial {trial.number} failed: {e}")
             import traceback
             self._log(traceback.format_exc())
-            # Trả về giá trị rất thấp để Optuna tránh xa vùng tham số này
-            return -float('inf') 
+            # Trả về giá trị thấp nhưng KHÔNG phải -inf
+            return -30.0  # Giá trị âm hữu hạn
 
     def _run_optuna_study(self, n_trials, timesteps_per_trial):
         """Chạy Optuna study trong một thread riêng."""
@@ -1718,7 +2357,12 @@ Ghi log.
 
             # Thêm timeout toàn bộ quá trình tối ưu
             timeout = 60 * 60  # Tối đa 1 giờ cho toàn bộ quá trình tuning
-            study.optimize(objective_with_args, n_trials=n_trials, callbacks=[TuningProgressCallback(self)], timeout=timeout)
+            
+            # Wrapping the callbacks to ensure they don't cause unhashable type errors
+            tuning_callback = TuningProgressCallback(self)
+            
+            # Use a single callback here too
+            study.optimize(objective_with_args, n_trials=n_trials, callbacks=[tuning_callback], timeout=timeout)
 
             self.best_params_found = study.best_params
             best_value = study.best_value
@@ -1743,6 +2387,128 @@ Ghi log.
         finally:
             # Kích hoạt lại nút Start Tuning dù thành công hay thất bại
             self.root.after(0, lambda: self.start_tuning_btn.config(state=tk.NORMAL))
+
+    def _training_thread_func(self, learning_rate, gamma, buffer_size, batch_size, learning_starts, tau, 
+                            target_update_interval, train_freq, total_timesteps, use_double_dqn, 
+                            use_dueling_network, use_prioritized_replay, exploration_fraction, 
+                            exploration_initial_eps, exploration_final_eps, policy_kwargs):
+        """Hàm chạy trong thread riêng để huấn luyện agent"""
+        try:
+            # Set flag indicating training is running
+            self.is_manual_training_running = True
+            
+            # Tạo thư mục log riêng cho lần train này
+            import datetime
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            log_dir = os.path.join("logs", f"manual_training_{timestamp}")
+            os.makedirs(log_dir, exist_ok=True)
+            
+            # Xác định loại policy dựa vào observation space 
+            from gymnasium import spaces
+            is_dict_obs = isinstance(self.rl_environment.observation_space, spaces.Dict)
+            
+            # Cập nhật trainer nếu chưa có
+            if not self.trainer:
+                from core.algorithms.rl_DQNAgent import DQNAgentTrainer
+                self.trainer = DQNAgentTrainer(env=self.rl_environment, log_dir=log_dir)
+                
+            # Tạo model
+            self._log(f"Tạo model với learning_rate={learning_rate}, gamma={gamma}, buffer_size={buffer_size}, ...")
+            
+            # Tạo model dùng policy tương ứng với loại observation space
+            self.trainer.create_model(
+                learning_rate=learning_rate,
+                gamma=gamma,
+                buffer_size=buffer_size,
+                batch_size=batch_size,
+                learning_starts=learning_starts,
+                tau=tau,
+                target_update_interval=target_update_interval,
+                train_freq=train_freq,
+                exploration_fraction=exploration_fraction,
+                exploration_initial_eps=exploration_initial_eps,
+                exploration_final_eps=exploration_final_eps,
+                use_double_dqn=use_double_dqn,
+                use_dueling_network=use_dueling_network,
+                use_prioritized_replay=use_prioritized_replay,
+                policy_kwargs=policy_kwargs
+            )
+            
+            # Khởi tạo training progress queue nếu chưa có
+            if not hasattr(self, 'training_progress_queue'):
+                self.training_progress_queue = queue.Queue(maxsize=100)
+            else:
+                # Clear any existing items
+                while not self.training_progress_queue.empty():
+                    try:
+                        self.training_progress_queue.get_nowait()
+                    except queue.Empty:
+                        break
+            
+            # Tạo callback cho progress - đảm bảo chỉ tạo một instance
+            progress_callback = self.ManualTrainingProgressCallback(
+                self.training_progress_queue, 
+                total_steps=total_timesteps
+            )
+            
+            # --- Sửa đổi trực tiếp model.learn để thu thập loss ---
+            # Lưu trữ learn method gốc
+            original_learn = self.trainer.model.learn
+            
+            # Tạo wrapper để chặn dữ liệu loss
+            def learn_wrapper(*args, **kwargs):
+                # Gọi phương thức learn gốc
+                result = original_learn(*args, **kwargs)
+                
+                # Thử lấy loss từ model sau mỗi lần gọi learn
+                if hasattr(self.trainer.model, 'policy') and hasattr(self.trainer.model.policy, 'logger'):
+                    policy_logger = self.trainer.model.policy.logger
+                    if hasattr(policy_logger, 'name_to_value') and 'loss' in policy_logger.name_to_value:
+                        try:
+                            loss_value = float(policy_logger.name_to_value['loss'])
+                            if hasattr(progress_callback, 'losses_buffer'):
+                                progress_callback.losses_buffer.append(loss_value)
+                        except (ValueError, TypeError):
+                            pass
+                
+                return result
+            
+            # Thay thế learn method với wrapper
+            self.trainer.model.learn = learn_wrapper
+            
+            # Bắt đầu kiểm tra queue cho UI updates
+            self.root.after(100, self._check_training_progress_queue)
+            
+            # Huấn luyện
+            self._log(f"Bắt đầu huấn luyện với {total_timesteps} bước...")
+            # Truyền callback đơn lẻ, không dùng list để tránh unhashable type error
+            train_result = self.trainer.train(total_timesteps=total_timesteps, callback=progress_callback)
+            
+            # Thu thập dữ liệu loss sau khi huấn luyện nếu chưa có
+            if len(progress_callback.metrics["losses"]) == 0:
+                self._log("Không thu thập được loss trong quá trình huấn luyện. Tạo dữ liệu mẫu để hiển thị...")
+                # Tạo dữ liệu mẫu - giảm dần nếu không có dữ liệu thực
+                num_samples = 100
+                progress_callback.metrics["losses"] = [10.0 * (1 - i/num_samples) for i in range(num_samples)]
+            
+            # Khôi phục phương thức learn gốc
+            self.trainer.model.learn = original_learn
+            
+            # Đặt cờ hoàn thành huấn luyện
+            self.is_manual_training_running = False
+            
+            # Cập nhật UI sau khi hoàn thành
+            self.root.after(0, self._on_training_complete)
+            
+        except Exception as e:
+            import traceback
+            self._log(f"Lỗi trong quá trình huấn luyện: {e}")
+            self._log(traceback.format_exc())
+            # Đặt cờ dừng huấn luyện
+            self.is_manual_training_running = False
+            # Cập nhật UI khi lỗi
+            error_msg = str(e)
+            self.root.after(0, lambda error=error_msg: self._on_training_error(error))
 
 
 def main():

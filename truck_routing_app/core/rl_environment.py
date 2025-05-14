@@ -7,6 +7,7 @@ from gymnasium import spaces
 import numpy as np
 import sys
 import os
+from typing import Any
 
 # Thêm thư mục cha vào sys.path để có thể import từ các module khác
 # sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
@@ -15,8 +16,8 @@ from .map import Map
 from .constants import CellType, MovementCosts, StationCosts, PathfindingWeights
 
 # Define global maximums for observation space, based on UI sliders
-GLOBAL_MAX_FUEL = 50.0
-GLOBAL_MAX_MONEY = 5000.0
+# GLOBAL_MAX_FUEL = 50.0 # Will be instance variable
+# GLOBAL_MAX_MONEY = 5000.0 # Will be instance variable
 
 # Define default ranges for randomization, based on UI sliders
 DEFAULT_MAX_FUEL_RANGE = (10.0, 50.0)
@@ -37,163 +38,188 @@ class TruckRoutingEnv(gym.Env):
     
     metadata = {'render.modes': ['human']}
     
-    def __init__(self, map_object, 
-                 max_fuel_config=None,
-                 initial_fuel_config=None, 
-                 initial_money_config=None, 
-                 fuel_per_move_config=None, 
-                 gas_station_cost_config=None, 
-                 toll_base_cost_config=None, 
-                 max_steps_per_episode=None):
+    def __init__(self, map_object: Map,
+                 initial_fuel: float = MovementCosts.MAX_FUEL,
+                 initial_money: float = 1500.0,
+                 fuel_per_move: float = MovementCosts.FUEL_PER_MOVE,
+                 gas_station_cost: float = StationCosts.BASE_GAS_COST,
+                 toll_base_cost: float = StationCosts.BASE_TOLL_COST,
+                 max_steps_per_episode: int | None = None, # Will default based on map_size if None
+                 obs_max_fuel: float = 70.0, # Default for observation space scaling (updated to match new MAX_FUEL)
+                 obs_max_money: float = 5000.0, # Default for observation space scaling
+                 moving_obstacles: bool = False):
         """
-        Khởi tạo môi trường với bản đồ và các cấu hình tham số.
-
-        Các tham số *_config có thể là một giá trị float (cố định) 
-        hoặc một tuple (min_val, max_val) cho việc ngẫu nhiên hóa.
+        Khởi tạo môi trường RL
+        
+        Args:
+            map_object: Đối tượng Map
+            initial_fuel: Nhiên liệu ban đầu mặc định
+            initial_money: Tiền ban đầu mặc định
+            fuel_per_move: Nhiên liệu tiêu thụ mỗi bước mặc định
+            gas_station_cost: Chi phí đổ xăng mặc định
+            toll_base_cost: Chi phí trạm thu phí mặc định
+            max_steps_per_episode: Số bước tối đa mỗi tập
+            obs_max_fuel: Giá trị tối đa cho fuel trong observation space
+            obs_max_money: Giá trị tối đa cho money trong observation space
+            moving_obstacles: Cờ cho chướng ngại vật di chuyển
         """
-        self.map_object = map_object
+        super().__init__()
         
-        # Helper to parse config values (float or tuple) into ranges (tuple)
-        def parse_config_to_range(config_val, default_val_or_range):
-            if config_val is None:
-                if isinstance(default_val_or_range, tuple):
-                    return default_val_or_range
-                else: # Single default value
-                    return (default_val_or_range, default_val_or_range)
-            if isinstance(config_val, tuple):
-                return config_val
-            else: # Single float value provided
-                return (float(config_val), float(config_val))
-
-        # Parse and store parameter ranges
-        self.max_fuel_range = parse_config_to_range(max_fuel_config, DEFAULT_MAX_FUEL_RANGE)
-        self.initial_fuel_range = parse_config_to_range(initial_fuel_config, DEFAULT_INITIAL_FUEL_RANGE)
-        self.initial_money_range = parse_config_to_range(initial_money_config, DEFAULT_INITIAL_MONEY_RANGE)
-        self.fuel_per_move_range = parse_config_to_range(fuel_per_move_config, DEFAULT_FUEL_PER_MOVE_RANGE)
-        self.gas_station_cost_range = parse_config_to_range(gas_station_cost_config, DEFAULT_GAS_STATION_COST_RANGE)
-        self.toll_base_cost_range = parse_config_to_range(toll_base_cost_config, DEFAULT_TOLL_BASE_COST_RANGE)
-
-        # Parameters for the current episode, to be set in reset()
-        self.current_episode_max_fuel = None
-        self.current_episode_initial_fuel = None # Value chosen from range before clamping
-        self.current_episode_initial_money = None
-        self.current_episode_fuel_per_move = None
-        self.current_episode_gas_station_cost = None
-        self.current_episode_toll_base_cost = None
-        
+        # Lưu tham số
+        self.map_object = map_object  
         self.map_size = map_object.size
-        self.start_pos = map_object.start_pos
+        
+        # Store default parameters
+        self.default_initial_fuel = float(initial_fuel)
+        self.default_initial_money = float(initial_money)
+        self.default_fuel_per_move = float(fuel_per_move)
+        self.default_gas_station_cost = float(gas_station_cost)
+        self.default_toll_base_cost = float(toll_base_cost)
+        self.default_max_steps_per_episode = int(max_steps_per_episode if max_steps_per_episode is not None else self.map_size * 3)
+
+        # Store observation space scaling factors
+        self.obs_max_fuel = float(obs_max_fuel)
+        self.obs_max_money = float(obs_max_money)
+
+        # Khởi tạo vị trí bắt đầu và kết thúc
+        self.start_pos = list(map_object.start_pos)
         self.end_pos = map_object.end_pos
+        self.current_pos = list(self.start_pos)
         
-        self.max_steps_per_episode = max_steps_per_episode if max_steps_per_episode is not None else 2 * self.map_size * self.map_size
+        # Đếm số ô chướng ngại vật trên bản đồ
+        self._obstacle_count = 0
+        for y in range(self.map_size):
+            for x in range(self.map_size):
+                if self.map_object.is_obstacle(x, y):
+                    self._obstacle_count += 1
         
-        self.current_pos = None
-        self.current_fuel = None
-        self.current_money = None
+        # Khởi tạo thêm biến trạng thái với các hằng số đúng
+        self.current_fuel = self.default_initial_fuel
+        self.current_money = self.default_initial_money
+        self.current_episode_max_fuel = self.default_initial_fuel # Max fuel for current episode is the initial fuel
+        self.current_episode_initial_money = self.default_initial_money
+        self.current_episode_fuel_per_move = self.default_fuel_per_move
+        self.current_episode_gas_station_cost = self.default_gas_station_cost
+        self.current_episode_toll_base_cost = self.default_toll_base_cost
+        
+        # Định nghĩa cấu trúc mapping hành động
+        self.action_mapping = {
+            0: 'UP',
+            1: 'RIGHT',
+            2: 'DOWN',
+            3: 'LEFT',
+            4: 'STAY'
+        }
+        
+        # Lưu trữ biến theo dõi step hiện tại
         self.current_step_in_episode = 0
+        self.max_steps_per_episode = self.default_max_steps_per_episode
         
-        # Trạng thái cho hình phạt "cố chấp" va chạm
+        # Theo dõi vị trí đã thăm
+        self._position_counter = {}
+        self._visited_positions = set()  # Positions visited by the agent (set of tuples)
+        self._visited_map = np.zeros((self.map_size, self.map_size), dtype=np.float32)  # 2D array to track visits
+        
+        # Theo dõi lộ trình
+        self._path_taken = []
+        
+        # Theo dõi va chạm với trở ngại gần đây
         self._last_collided_pos = None
         self._last_collided_action = None
         self._successful_moves_after_collision = 0
         
-        # Cải thiện bộ nhớ ngắn hạn để phát hiện vòng lặp hiệu quả hơn
-        self._recent_positions = []
-        self._memory_length = 20  # Tăng từ 15 lên 20 vị trí gần nhất
-        self._revisit_penalty = 4.0  # Tăng từ 3.0 lên 4.0 để khuyến khích thoát vòng lặp mạnh hơn
+        # Theo dõi tiến độ
+        self._progress_tracking = {
+            "distance_improvement_count": 0,
+            "best_distance_to_goal": float('inf'),
+            "no_progress_count": 0
+        }
         
-        # Thêm bộ đếm vòng lặp mới
-        self._position_counter = {}  # Đếm số lần xuất hiện của mỗi vị trí
-        self._loop_penalty_factor = 0.8  # Tăng hệ số nhân của hình phạt vòng lặp
-        self._loop_detected = False  # Cờ đánh dấu đã phát hiện vòng lặp
-        self._stuck_threshold = 4  # Giảm ngưỡng phát hiện mắc kẹt (số lần lặp lại vị trí)
+        # Định nghĩa không gian observation và action
+        self._define_spaces()
         
-        # Thêm biến theo dõi khoảng cách đến đích cho shaped reward
-        self._last_distance_to_goal = None
-        self._potential_scale = 1.0  # Hệ số cho phần thưởng tiềm năng
+        # Reset môi trường
+        self.reset()
         
-        # Thêm biến theo dõi vị trí đã thăm để tránh quay lại
-        self._visited_positions = set()
-        self._optimal_path_length = None  # Ước tính độ dài đường đi tối ưu
+    def _define_spaces(self):
+        """
+        Định nghĩa không gian observation và action
+        """
+        self.action_space = spaces.Discrete(5)
         
-        # Thêm bộ nhớ đường đi đã đi qua
-        self._path_taken = []
-        
-        self.action_space = spaces.Discrete(6)
-        
-        # Observation space with randomized environment parameters
+        # Observation space với các tham số có thể thay đổi
         self.observation_space = spaces.Dict({
             'agent_pos': spaces.Box(low=0, high=self.map_size-1, shape=(2,), dtype=np.int32),
-            'fuel': spaces.Box(low=0.0, high=GLOBAL_MAX_FUEL, shape=(1,), dtype=np.float32),
-            'money': spaces.Box(low=0.0, high=GLOBAL_MAX_MONEY, shape=(1,), dtype=np.float32),
+            'fuel': spaces.Box(low=0.0, high=self.obs_max_fuel, shape=(1,), dtype=np.float32),
+            'money': spaces.Box(low=0.0, high=self.obs_max_money, shape=(1,), dtype=np.float32),
             'target_pos': spaces.Box(low=0, high=self.map_size-1, shape=(2,), dtype=np.int32),
-            'local_map': spaces.Box(low=-2, high=CellType.GAS.value, shape=(5, 5), dtype=np.int32),
+            'local_map': spaces.Box(low=-2, high=CellType.GAS.value, shape=(3, 3), dtype=np.int32),
+            'visited_map': spaces.Box(low=0, high=1, shape=(self.map_size, self.map_size), dtype=np.float32),
             'env_params': spaces.Box(
-                low=np.array([self.max_fuel_range[0], self.fuel_per_move_range[0], self.gas_station_cost_range[0], self.toll_base_cost_range[0]], dtype=np.float32),
-                high=np.array([self.max_fuel_range[1], self.fuel_per_move_range[1], self.gas_station_cost_range[1], self.toll_base_cost_range[1]], dtype=np.float32),
-                shape=(4,), 
+                low=np.array([0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32),
+                high=np.array([1.0, 1.0, 2.0, 1.0, 1.0], dtype=np.float32),
+                shape=(5,), 
                 dtype=np.float32
-            ),
-            # Thêm thông tin khoảng cách Manhattan đến đích
-            'distance_to_goal': spaces.Box(low=0, high=2*self.map_size, shape=(1,), dtype=np.int32),
-            # Thêm thông tin số bước đã đi
-            'steps_taken': spaces.Box(low=0, high=self.max_steps_per_episode, shape=(1,), dtype=np.int32),
-            # Thêm thông tin đã từng thăm vị trí hiện tại chưa
-            'visited_current': spaces.Box(low=0, high=1, shape=(1,), dtype=np.int32)
-        })
+            )
+        }) # Type of observation_space is gym.spaces.Dict
     
-    def _get_observation(self):
+    def _get_observation(self) -> dict[str, np.ndarray]:
         """
         Lấy trạng thái quan sát hiện tại của môi trường.
         
         Returns:
             dict: Trạng thái quan sát hiện tại
         """
-        # Lấy bản đồ cục bộ 5x5 xung quanh agent
+        # Lấy bản đồ cục bộ 3x3 xung quanh agent
         local_map = self._get_local_map_view(self.current_pos)
         
         # Tính khoảng cách Manhattan đến đích
         distance_to_goal = self._calculate_distance(self.current_pos, self.end_pos)
         
-        # Kiểm tra xem vị trí hiện tại đã từng thăm chưa
-        visited_current = 1 if self.current_pos in self._visited_positions else 0
+        # Kiểm tra xem vị trí hiện tại đã từng thăm chưa - chuyển thành tuple để có thể làm key
+        visited_current = 1 if tuple(self.current_pos) in self._visited_positions else 0
         
-        return {
+        # Lấy thông tin trạng thái xe
+        agent_state = np.array([
+            self.current_fuel / self.current_episode_max_fuel if self.current_episode_max_fuel > 0 else 0.0,  # Chuẩn hóa nhiên liệu (0-1)
+            self.current_money / self.obs_max_money if self.obs_max_money > 0 else 0.0,  # Chuẩn hóa tiền (0-1)
+            self.current_episode_fuel_per_move / MovementCosts.FUEL_PER_MOVE if MovementCosts.FUEL_PER_MOVE > 0 else 0.0, # Chuẩn hóa mức tiêu thụ nhiên liệu
+            distance_to_goal / (self.map_size * 2) if self.map_size > 0 else 0.0,  # Chuẩn hóa khoảng cách tới đích
+            visited_current,  # Đã từng thăm vị trí hiện tại chưa (0/1)
+        ], dtype=np.float32)
+        
+        # Tạo observation dict
+        observation = {
             'agent_pos': np.array(self.current_pos, dtype=np.int32),
             'fuel': np.array([self.current_fuel], dtype=np.float32),
             'money': np.array([self.current_money], dtype=np.float32),
             'target_pos': np.array(self.end_pos, dtype=np.int32),
-            'local_map': local_map,
-            'env_params': np.array([
-                self.current_episode_max_fuel,
-                self.current_episode_fuel_per_move,
-                self.current_episode_gas_station_cost,
-                self.current_episode_toll_base_cost
-            ], dtype=np.float32),
-            'distance_to_goal': np.array([distance_to_goal], dtype=np.int32),
-            'steps_taken': np.array([self.current_step_in_episode], dtype=np.int32),
-            'visited_current': np.array([visited_current], dtype=np.int32)
+            'local_map': local_map.astype(np.int32),
+            'visited_map': self._visited_map,
+            'env_params': agent_state,
         }
+        
+        return observation
     
-    def _get_local_map_view(self, position):
+    def _get_local_map_view(self, position: tuple[int, int]) -> np.ndarray:
         """
-        Lấy bản đồ cục bộ 5x5 xung quanh vị trí hiện tại.
+        Lấy bản đồ cục bộ 3x3 xung quanh vị trí hiện tại.
         Tầm nhìn nhỏ hơn giúp agent tập trung vào môi trường gần và đơn giản hóa quá trình học.
         
         Args:
             position (tuple): Vị trí hiện tại (x, y)
             
         Returns:
-            np.ndarray: Ma trận 5x5 thể hiện bản đồ cục bộ
+            np.ndarray: Ma trận 3x3 thể hiện bản đồ cục bộ
         """
         x, y = position
-        local_map = np.ones((5, 5), dtype=np.int32) * -2  # -2 là giá trị mặc định cho bên ngoài bản đồ
+        local_map = np.ones((3, 3), dtype=np.int32) * -2  # -2 là giá trị mặc định cho bên ngoài bản đồ
         
-        # Lấy vùng 5x5 xung quanh vị trí hiện tại
-        for i in range(5):
-            for j in range(5):
-                map_x = x + (j - 2)  # Dịch để vị trí hiện tại ở giữa (2,2)
-                map_y = y + (i - 2)
+        # Lấy vùng 3x3 xung quanh vị trí hiện tại
+        for i in range(3):
+            for j in range(3):
+                map_x = x + (j - 1)  # Dịch để vị trí hiện tại ở giữa (1,1)
+                map_y = y + (i - 1)
                 
                 # Nếu vị trí nằm trong bản đồ, lấy giá trị từ bản đồ
                 if 0 <= map_x < self.map_size and 0 <= map_y < self.map_size:
@@ -201,7 +227,7 @@ class TruckRoutingEnv(gym.Env):
         
         return local_map
     
-    def reset(self, seed=None, options=None, evaluation_params=None):
+    def reset(self, seed: int | None = None, options: dict | None = None, evaluation_params: dict | None = None) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
         """
         Đặt lại môi trường về trạng thái ban đầu.
         Ngẫu nhiên hóa các tham số môi trường nếu không ở chế độ đánh giá.
@@ -210,356 +236,322 @@ class TruckRoutingEnv(gym.Env):
             seed: Seed cho random state
             options: Tùy chọn bổ sung
             evaluation_params (dict, optional): Nếu được cung cấp, đặt các tham số môi trường
-                                               thay vì ngẫu nhiên hóa. Keys dự kiến:
-                                               'max_fuel', 'initial_fuel', 'initial_money',
-                                               'fuel_per_move', 'gas_station_cost', 'toll_base_cost'.
+                                               theo các giá trị được chỉ định (để đánh giá)
+        
         Returns:
-            tuple: (observation, info)
+            dict: Trạng thái quan sát ban đầu
+            dict: Thông tin bổ sung
         """
-        if seed is not None:
-            np.random.seed(seed) # Ensure reproducibility if seed is passed
-            # super().reset(seed=seed) # Call parent reset if gym.Env is directly inherited and handles seed
-
-        if evaluation_params:
-            # Evaluation mode: Use provided parameters
-            self.current_episode_max_fuel = evaluation_params.get('max_fuel', np.random.uniform(self.max_fuel_range[0], self.max_fuel_range[1]))
-            _initial_fuel_eval = evaluation_params.get('initial_fuel', np.random.uniform(self.initial_fuel_range[0], self.initial_fuel_range[1]))
-            # Clamp initial fuel by max fuel
-            self.current_episode_initial_fuel = min(_initial_fuel_eval, self.current_episode_max_fuel)
-            self.current_episode_initial_money = evaluation_params.get('initial_money', np.random.uniform(self.initial_money_range[0], self.initial_money_range[1]))
-            self.current_episode_fuel_per_move = evaluation_params.get('fuel_per_move', np.random.uniform(self.fuel_per_move_range[0], self.fuel_per_move_range[1]))
-            self.current_episode_gas_station_cost = evaluation_params.get('gas_station_cost', np.random.uniform(self.gas_station_cost_range[0], self.gas_station_cost_range[1]))
-            self.current_episode_toll_base_cost = evaluation_params.get('toll_base_cost', np.random.uniform(self.toll_base_cost_range[0], self.toll_base_cost_range[1]))
-        else:
-            # Training mode: Randomize all parameters
-            self.current_episode_max_fuel = np.random.uniform(self.max_fuel_range[0], self.max_fuel_range[1])
-            _initial_fuel_random = np.random.uniform(self.initial_fuel_range[0], self.initial_fuel_range[1])
-            # Clamp initial fuel by max fuel
-            self.current_episode_initial_fuel = min(_initial_fuel_random, self.current_episode_max_fuel)
-            self.current_episode_initial_money = np.random.uniform(self.initial_money_range[0], self.initial_money_range[1])
-            self.current_episode_fuel_per_move = np.random.uniform(self.fuel_per_move_range[0], self.fuel_per_move_range[1])
-            self.current_episode_gas_station_cost = np.random.uniform(self.gas_station_cost_range[0], self.gas_station_cost_range[1])
-            self.current_episode_toll_base_cost = np.random.uniform(self.toll_base_cost_range[0], self.toll_base_cost_range[1])
-
-        # Set initial state
-        self.current_pos = self.start_pos
-        self.current_fuel = self.current_episode_initial_fuel 
-        self.current_money = self.current_episode_initial_money
+        # Đặt lại seed (nếu được cung cấp)
+        super().reset(seed=seed)
+        
+        # Đặt lại vị trí hiện tại về điểm bắt đầu
+        self.current_pos = list(self.start_pos)
+        
+        # Đặt lại biến theo dõi thời gian
         self.current_step_in_episode = 0
         
-        # Reset loop detection
-        self._recent_positions = [self.start_pos]  # Start with initial position
-        self._position_counter = {self.start_pos: 1}  # Initialize counter
-        self._loop_detected = False
-        
-        # Reset other tracking variables
+        # Đặt lại biến theo dõi va chạm
         self._last_collided_pos = None
         self._last_collided_action = None
         self._successful_moves_after_collision = 0
         
-        # Reset visited positions
-        self._visited_positions = {self.start_pos}
+        # Đặt lại biến theo dõi tiến độ
+        self._progress_tracking = {
+            "distance_improvement_count": 0,
+            "best_distance_to_goal": float('inf'),
+            "no_progress_count": 0
+        }
         
-        # Reset path tracking
-        self._path_taken = [self.start_pos]
-        
-        # Calculate initial distance to goal for potential-based reward
+        # Khởi tạo khoảng cách ban đầu đến đích
         self._last_distance_to_goal = self._calculate_distance(self.current_pos, self.end_pos)
         
-        # Estimate optimal path length using Manhattan distance
-        self._optimal_path_length = self._calculate_distance(self.start_pos, self.end_pos)
+        # Đặt lại biến theo dõi vị trí đã thăm
+        self._position_counter = {}
+        self._visited_positions = set([tuple(self.current_pos)])  # Bắt đầu với vị trí hiện tại
+        self._visited_map = np.zeros((self.map_size, self.map_size), dtype=np.float32)
+        self._visited_map[self.current_pos[1], self.current_pos[0]] = 1.0  # Đánh dấu vị trí đầu tiên
         
-        # Get initial observation
-        observation = self._get_observation()
+        # Đặt lại lộ trình
+        self._path_taken = [tuple(self.current_pos)]
         
-        # Return observation and info
+        # --- Ngẫu nhiên hóa tham số ---
+        if evaluation_params:
+            # Chế độ đánh giá: sử dụng các tham số được chỉ định
+            self.current_fuel = float(evaluation_params.get('initial_fuel', self.default_initial_fuel))
+            self.current_episode_max_fuel = float(evaluation_params.get('initial_fuel', self.default_initial_fuel)) # Max fuel is initial for eval
+            self.current_money = float(evaluation_params.get('initial_money', self.default_initial_money))
+            self.current_episode_initial_money = float(evaluation_params.get('initial_money', self.default_initial_money))
+            self.current_episode_fuel_per_move = float(evaluation_params.get('fuel_per_move', self.default_fuel_per_move))
+            self.current_episode_gas_station_cost = float(evaluation_params.get('gas_station_cost', self.default_gas_station_cost))
+            self.current_episode_toll_base_cost = float(evaluation_params.get('toll_base_cost', self.default_toll_base_cost))
+            self.max_steps_per_episode = int(evaluation_params.get('max_steps_per_episode', self.default_max_steps_per_episode))
+        else:
+            # Chế độ huấn luyện: sử dụng các giá trị mặc định đã lưu
+            self.current_fuel = self.default_initial_fuel
+            self.current_episode_max_fuel = self.default_initial_fuel
+            self.current_money = self.default_initial_money
+            self.current_episode_initial_money = self.default_initial_money
+            self.current_episode_fuel_per_move = self.default_fuel_per_move
+            self.current_episode_gas_station_cost = self.default_gas_station_cost
+            self.current_episode_toll_base_cost = self.default_toll_base_cost
+            self.max_steps_per_episode = self.default_max_steps_per_episode
+        
+        # Thêm thông tin bản đồ để debug
+        optimal_path_estimate = self._calculate_distance(self.start_pos, self.end_pos)
         info = {
-            'episode_params': {
+            'map_info': {
+                'size': self.map_size,
+                'obstacles': self._obstacle_count,
+                'optimal_path_estimate': optimal_path_estimate,
+                'start_pos': self.start_pos,
+                'end_pos': self.end_pos
+            },
+            'env_params': {
                 'max_fuel': self.current_episode_max_fuel,
-                'initial_fuel': self.current_episode_initial_fuel,
-                'initial_money': self.current_episode_initial_money,
                 'fuel_per_move': self.current_episode_fuel_per_move,
                 'gas_station_cost': self.current_episode_gas_station_cost,
-                'toll_base_cost': self.current_episode_toll_base_cost
+                'toll_base_cost': self.current_episode_toll_base_cost,
+                'max_steps': self.max_steps_per_episode
             }
         }
         
-        return observation, info
+        # Lấy observation mới
+        return self._get_observation(), info
     
-    def step(self, action):
+    def step(self, action: int) -> tuple[dict[str, np.ndarray], float, bool, bool, dict[str, Any]]:
         """
-        Thực hiện một bước trong môi trường với hành động đã chọn.
+        Thực hiện một bước trong môi trường dựa trên action đã chọn.
         
         Args:
-            action (int): Hành động của agent (0-5)
-                0: Không làm gì (đứng yên)
-                1: Di chuyển lên trên
-                2: Di chuyển sang phải
-                3: Di chuyển xuống dưới
-                4: Di chuyển sang trái
-                5: Nạp nhiên liệu/trả phí (tùy thuộc vào ô hiện tại)
-        
+            action: ID của hành động (0: Up, 1: Right, 2: Down, 3: Left, 4: Stay)
+            
         Returns:
-            tuple: (observation, reward, done, truncated, info)
+            observation: State mới
+            reward: Phần thưởng
+            terminated: Episode đã kết thúc chưa
+            truncated: Episode đã bị cắt ngắn chưa
+            info: Thông tin thêm
         """
-        # Tăng bước hiện tại
+        # Tăng số bước đã thực hiện
         self.current_step_in_episode += 1
-        truncated = self.current_step_in_episode >= self.max_steps_per_episode
         
-        # Lưu giữ trạng thái trước khi thay đổi để tính phần thưởng
-        prev_pos = self.current_pos
+        # Convert action to integer if it's a numpy array or tensor
+        if hasattr(action, 'item'):
+            action = action.item()  # For numpy arrays and PyTorch tensors
+        elif hasattr(action, '__iter__'):
+            # For other iterable types like lists
+            action = action[0] if len(action) > 0 else 0
         
-        # Khởi tạo phần thưởng và trạng thái kết thúc
-        reward = 0.0
-        done = False
-        info = {
-            "action_taken": action,
-            "step_number": self.current_step_in_episode
-        }
+        # Kiểm tra hành động hợp lệ
+        if not (0 <= action <= 4):
+            # Hành động không hợp lệ, phạt nặng và kết thúc episode
+            observation = self._get_observation()
+            info = {
+                "termination_reason": "hanh_dong_khong_hop_le",
+                "truck_state": {
+                    "position": self.current_pos,
+                    "fuel": self.current_fuel,
+                    "money": self.current_money
+                }
+            }
+            return observation, -50.0, True, False, info  # Đánh dấu terminated=True để kết thúc ngay
         
-        # Variable để theo dõi xem đã mua nhiên liệu hay trả phí trong bước này
-        did_buy_fuel = False
-        did_pay_toll = False
+        # Mặc định reward cho mỗi bước đi là nhỏ âm (để khuyến khích tìm đường đi ngắn nhất)
+        reward = -0.01 # Reduced from -0.05
         
-        # Xử lý dựa trên hành động
-        if action == 0:  # Đứng yên (không làm gì)
-            # Phạt nhẹ nếu đứng yên không cần thiết
-            reward -= 0.2  # Giảm hình phạt đứng yên từ 0.5 xuống còn 0.2
-            # Không trừ nhiên liệu khi đứng yên
-            
-            # Thêm thông tin
-            info["action_result"] = "dung_yen"
-            
-        elif 1 <= action <= 4:  # Di chuyển
-            # Tính toán vị trí mới dựa trên hành động
-            new_pos = list(self.current_pos)
-            if action == 1:  # Lên trên
-                new_pos[1] = max(0, new_pos[1] - 1)
-            elif action == 2:  # Sang phải
-                new_pos[0] = min(self.map_size - 1, new_pos[0] + 1)
-            elif action == 3:  # Xuống dưới
-                new_pos[1] = min(self.map_size - 1, new_pos[1] + 1)
-            elif action == 4:  # Sang trái
-                new_pos[0] = max(0, new_pos[0] - 1)
-            
-            new_pos = tuple(new_pos)
-            
-            # Kiểm tra xem ô mới có phải là vật cản không
-            cell_type = self.map_object.get_cell_type(new_pos)
-                
-            if cell_type == CellType.OBSTACLE:
-                # Không di chuyển được vào ô vật cản và nhận hình phạt
-                reward -= 2.0  # Tăng hình phạt va chạm lên 2.0 để tránh va chạm
-                
-                # Theo dõi va chạm với cùng vật cản
-                if self._last_collided_pos == new_pos and self._last_collided_action == action:
-                    # Phạt nặng hơn nếu lặp lại cùng một va chạm
-                    reward -= 4.0  # Tăng hình phạt để khuyến khích tránh lặp lại
-                    info["action_result"] = "va_cham_vat_can_nhung_khong_ket_thuc"
-                else:
-                    # Đặt lại bộ đếm va chạm
-                    self._last_collided_pos = new_pos
-                    self._last_collided_action = action
-                    self._successful_moves_after_collision = 0
-                    info["action_result"] = "va_cham_vat_can"
-            else:
-                # Nếu có đủ nhiên liệu, cho phép di chuyển
-                if self.current_fuel >= self.current_episode_fuel_per_move:
-                    # Di chuyển đến ô mới
-                    self.current_pos = new_pos
-                    self.current_fuel -= self.current_episode_fuel_per_move
-                    
-                    # Thêm vị trí mới vào đường đi
-                    self._path_taken.append(new_pos)
-                    
-                    # Ghi nhận vị trí đã thăm
-                    self._visited_positions.add(new_pos)
-                    
-                    # Phần thưởng cơ bản cho di chuyển mới
-                    if new_pos not in self._recent_positions:
-                        reward += 0.1  # Thưởng cho việc khám phá vị trí mới
-                    
-                    # Sử dụng phần thưởng tiềm năng dựa trên khoảng cách đến đích
-                    current_distance = self._calculate_distance(new_pos, self.end_pos)
-                    potential_reward = self._last_distance_to_goal - current_distance
-                    reward += potential_reward * self._potential_scale
-                    self._last_distance_to_goal = current_distance
-                    
-                    # Thêm phần thưởng nếu đến được các ô chức năng
-                    if cell_type == CellType.GAS:
-                        reward += 0.5  # Thưởng cho việc tìm thấy trạm xăng
-                    elif cell_type == CellType.TOLL:
-                        # Không thưởng cho việc tìm thấy trạm thu phí vì đó không phải lúc nào cũng tốt
-                        pass
-                    
-                    # Ghi nhận di chuyển thành công sau va chạm
-                    self._successful_moves_after_collision += 1
-                    if self._successful_moves_after_collision >= 3:
-                        # Reset trạng thái va chạm nếu đã di chuyển thành công một số bước
-                        self._last_collided_pos = None
-                        self._last_collided_action = None
-                    
-                    # Ghi nhận vị trí mới vào bộ nhớ ngắn hạn
-                    self._recent_positions.append(new_pos)
-                    if len(self._recent_positions) > self._memory_length:
-                        self._recent_positions.pop(0)
-                    
-                    # Cập nhật bộ đếm vị trí
-                    self._position_counter[new_pos] = self._position_counter.get(new_pos, 0) + 1
-                    
-                    # Phát hiện và xử lý vòng lặp
-                    if self._position_counter[new_pos] >= self._stuck_threshold:
-                        self._loop_detected = True
-                        # Phạt để khuyến khích thoát khỏi vòng lặp
-                        loop_penalty = self._revisit_penalty * self._loop_penalty_factor * self._position_counter[new_pos]
-                        reward -= min(loop_penalty, 10.0)  # Giới hạn hình phạt tối đa
-                        info["action_result"] = "phat_hien_vong_lap"
-                    else:
-                        info["action_result"] = "di_chuyen_thanh_cong"
-                    
-                    # Kiểm tra xem đã đến đích chưa
-                    if new_pos == self.end_pos:
-                        done = True
-                        
-                        # Phần thưởng lớn cho việc đến đích
-                        base_reward = 100.0
-                        
-                        # Thưởng hiệu quả: nhiều nhiên liệu và tiền còn lại
-                        efficiency_reward = (self.current_fuel / self.current_episode_max_fuel) * 50.0
-                        efficiency_reward += (self.current_money / self.current_episode_initial_money) * 50.0
-                        
-                        # Thưởng cho việc tìm đường ngắn
-                        path_length = len(set(self._path_taken))  # Số ô khác nhau đã đi qua
-                        path_efficiency = min(2.0, self._optimal_path_length / max(1, path_length - 1))
-                        path_reward = path_efficiency * 50.0
-                        
-                        # Kết hợp các phần thưởng
-                        total_reward = base_reward + efficiency_reward + path_reward
-                        reward += total_reward
-                        
-                        info["termination_reason"] = "den_dich"
-                        info["path_length"] = len(self._path_taken) - 1  # Không tính vị trí ban đầu
-                        info["unique_cells_visited"] = len(set(self._path_taken))
-                        info["remaining_fuel"] = self.current_fuel
-                        info["remaining_money"] = self.current_money
-                        info["optimal_path_estimate"] = self._optimal_path_length
-                else:
-                    # Không đủ nhiên liệu để di chuyển
-                    reward -= 1.0
-                    info["action_result"] = "khong_du_nhien_lieu"
-                    
-                    # Kết thúc episode nếu không thể di chuyển và không ở trạm xăng
-                    if self.map_object.get_cell_type(self.current_pos) != CellType.GAS:
-                        done = True
-                        reward -= 20.0  # Phạt nặng
-                        info["termination_reason"] = "het_nhien_lieu"
-                        
-        elif action == 5:  # Nạp nhiên liệu hoặc trả phí
-            cell_type = self.map_object.get_cell_type(self.current_pos)
-            
-            if cell_type == CellType.GAS:
-                # Ở trạm xăng, có thể nạp nhiên liệu
-                if self.current_money >= self.current_episode_gas_station_cost:
-                    # Tính toán lượng nhiên liệu cần nạp
-                    missing_fuel = self.current_episode_max_fuel - self.current_fuel
-                    if missing_fuel > 0:
-                        # Nạp nhiên liệu và trừ tiền
-                        self.current_fuel = self.current_episode_max_fuel 
-                        self.current_money -= self.current_episode_gas_station_cost
-                        did_buy_fuel = True
-                        
-                        # Phần thưởng cho việc nạp nhiên liệu phụ thuộc vào lượng nhiên liệu cần
-                        normalized_missing = missing_fuel / self.current_episode_max_fuel
-                        fuel_reward = normalized_missing * 2.0  # Phần thưởng dựa vào % nhiên liệu cần nạp
-                        reward += max(0.5, fuel_reward)  # Ít nhất 0.5 reward
-                        
-                        info["action_result"] = "nap_nhien_lieu_thanh_cong"
-                        info["fuel_before"] = self.current_fuel - missing_fuel
-                        info["fuel_after"] = self.current_fuel
-                        info["money_spent"] = self.current_episode_gas_station_cost
-                    else:
-                        # Không cần nạp nhiên liệu
-                        reward -= 0.5  # Phạt nhẹ
-                        info["action_result"] = "khong_can_nap_nhien_lieu"
-                else:
-                    # Không đủ tiền để nạp nhiên liệu
-                    reward -= 1.0
-                    info["action_result"] = "khong_du_tien_nap_nhien_lieu"
-                    
-                    # Nếu ở trạm xăng, hết tiền VÀ ít nhiên liệu, kết thúc
-                    if self.current_fuel < self.current_episode_fuel_per_move:
-                        done = True
-                        reward -= 20.0  # Phạt nặng
-                        info["termination_reason"] = "het_tien"
-            
-            elif cell_type == CellType.TOLL:
-                # Ở trạm thu phí, phải trả phí để tiếp tục
-                toll_cost = self.current_episode_toll_base_cost
-                
-                if self.current_money >= toll_cost:
-                    # Trả phí
-                    self.current_money -= toll_cost
-                    did_pay_toll = True
-                    
-                    # Phần thưởng nhỏ cho việc trả phí đúng
-                    reward += 0.5
-                    
-                    info["action_result"] = "tra_phi_thanh_cong"
-                    info["money_spent"] = toll_cost
-                else:
-                    # Không đủ tiền để trả phí
-                    reward -= 2.0
-                    info["action_result"] = "khong_du_tien_tra_phi"
-                    
-                    # Không thể tiếp tục nếu không trả phí và không có đủ tiền
-                    done = True
-                    reward -= 10.0
-                    info["termination_reason"] = "het_tien"
-            
-            else:
-                # Không phải ô đặc biệt, hành động không có tác dụng
-                reward -= 1.0
-                info["action_result"] = "khong_phai_o_dac_biet"
-        
-        # Kiểm tra trường hợp kết thúc do hết tiền
-        if self.current_money <= 0 and not done:
-            # Chỉ kết thúc nếu ở trạm thu phí hoặc cần nạp nhiên liệu
-            cell_type = self.map_object.get_cell_type(self.current_pos)
-            if cell_type == CellType.TOLL or (cell_type == CellType.GAS and self.current_fuel < self.current_episode_fuel_per_move):
-                done = True
-                reward -= 20.0
-                info["termination_reason"] = "het_tien"
-        
-        # Kiểm tra điều kiện dừng: hết nhiên liệu
-        if self.current_fuel <= 0 and not done:
-            done = True
-            reward -= 20.0
-            info["termination_reason"] = "het_nhien_lieu"
-        
-        # Thêm thông tin cho truncated
-        if truncated:
-            done = True
-            reward -= 10.0  # Phạt nếu vượt quá số bước tối đa
-            info["termination_reason"] = "vuot_qua_so_buoc"
-        
-        # Cập nhật trạng thái và trả về kết quả
+        # Lấy hành động dựa vào action ID
+        action_name = self.action_mapping[action]
+
+        # Get current observation BEFORE making any move or checking terminal conditions that return it
         observation = self._get_observation()
         
-        # Thêm thông tin chi tiết vào info
-        info["current_pos"] = self.current_pos
-        info["current_fuel"] = self.current_fuel
-        info["current_money"] = self.current_money
-        info["visited_positions"] = list(self._visited_positions)
-        info["truck_state"] = {
-            "position": self.current_pos,
-            "fuel": self.current_fuel,
-            "money": self.current_money,
-            "buy_fuel": did_buy_fuel,
-            "pay_toll": did_pay_toll
-        }
+        # Tính toán vị trí mới dựa vào hành động
+        new_pos = list(self.current_pos)
+        if action_name == 'UP':
+            new_pos[1] -= 1
+        elif action_name == 'RIGHT':
+            new_pos[0] += 1
+        elif action_name == 'DOWN':
+            new_pos[1] += 1
+        elif action_name == 'LEFT':
+            new_pos[0] -= 1
+        elif action_name == 'STAY':
+            pass  # Giữ nguyên vị trí
+            
+        # Kiểm tra va chạm với biên và vật cản
+        if (new_pos[0] < 0 or new_pos[0] >= self.map_object.size or 
+            new_pos[1] < 0 or new_pos[1] >= self.map_object.size or
+            self.map_object.is_obstacle(new_pos[0], new_pos[1])):
+            
+            # Va chạm, phạt nhẹ và giữ nguyên vị trí
+            collision_penalty = -2.0
+            reward += collision_penalty
+            
+            # Lưu thông tin va chạm gần đây
+            self._last_collided_pos = tuple(self.current_pos)
+            self._last_collided_action = action
+            self._successful_moves_after_collision = 0
+            
+            # Trả về observation mới
+            info = {
+                "collision": True,
+                "truck_state": {
+                    "position": self.current_pos,
+                    "fuel": self.current_fuel,
+                    "money": self.current_money
+                }
+            }
+            
+            # Nếu đã hết số bước tối đa, đánh dấu truncated (cắt ngắn)
+            if self.current_step_in_episode >= self.max_steps_per_episode:
+                info["termination_reason"] = "het_so_buoc"
+                return observation, reward, False, True, info
+                
+            return observation, reward, False, False, info
+            
+        # Thực hiện di chuyển nếu không có vật cản
+        previous_pos = tuple(self.current_pos)
+        self.current_pos = new_pos
         
-        # Định dạng kết quả theo Gymnasium API
-        return observation, reward, done, truncated, info
+        # Thêm vị trí mới vào lộ trình
+        self._path_taken.append(tuple(self.current_pos))
+        
+        # Lưu vị trí đã đi qua vào tập các vị trí đã thăm
+        current_pos_tuple = tuple(self.current_pos)
+        self._visited_positions.add(current_pos_tuple)
+        
+        # Cập nhật visited map
+        self._visited_map[self.current_pos[1], self.current_pos[0]] = 1.0
+        
+        # Trừ nhiên liệu khi di chuyển
+        self.current_fuel -= self.current_episode_fuel_per_move
+        
+        # Kiểm tra nếu đi qua trạm thu phí
+        if self.map_object.grid[self.current_pos[1], self.current_pos[0]] == CellType.TOLL:
+            # Tính toán chi phí đi qua trạm thu phí
+            toll_cost = self.current_episode_toll_base_cost
+            
+            # Trừ tiền và ghi lại trạm thu phí đã sử dụng
+            if self.current_money >= toll_cost:
+                self.current_money -= toll_cost
+            else:
+                # Nếu không đủ tiền, quay lại vị trí cũ và kết thúc episode
+                self.current_pos = list(previous_pos)
+                self._path_taken.append(tuple(self.current_pos))
+                info = {
+                    "termination_reason": "khong_du_tien_qua_tram",
+                    "truck_state": {
+                        "position": self.current_pos,
+                        "fuel": self.current_fuel,
+                        "money": self.current_money
+                    }
+                }
+                return observation, -10.0, True, False, info  # Terminated = True khi không đủ tiền qua trạm
+        
+        # Kiểm tra phát hiện chu trình (agent đi lòng vòng)
+        if current_pos_tuple in self._position_counter:
+            self._position_counter[current_pos_tuple] += 1
+            
+            # Tăng mức phạt khi quay lại vị trí đã thăm (từ 0.2 lên 1.0)
+            revisit_penalty = min(3.0, 0.5 * (self._position_counter[current_pos_tuple] - 1))
+            
+            # Giảm ngưỡng kết thúc nếu lặp quá nhiều lần (từ 10 xuống 6)
+            if self._position_counter[current_pos_tuple] > 8:
+                info = {
+                    "termination_reason": "lap_qua_nhieu",
+                    "truck_state": {
+                        "position": self.current_pos,
+                        "fuel": self.current_fuel,
+                        "money": self.current_money
+                    }
+                }
+                return observation, -15.0, True, False, info  # Tăng mức phạt từ -10.0 lên -15.0
+            
+            reward = -revisit_penalty  # Phạt mạnh hơn cho việc quay lại
+        else:
+            self._position_counter[current_pos_tuple] = 1
+            # Khuyến khích khám phá ô mới
+            reward = 1.0  # Increased from 0.5 to 1.0
+        
+        # Cập nhật khoảng cách Manhattan đến đích
+        current_dist = self._calculate_distance(self.current_pos, self.end_pos)
+        dist_diff = self._last_distance_to_goal - current_dist
+        self._last_distance_to_goal = current_dist
+        
+        # Tăng rewards dựa trên tiến độ về phía đích (tăng từ 0.5 lên 1.5 nếu tiến gần đích)
+        if dist_diff > 0:  # Tiến gần đích
+            progress_reward = 2.0  # Increased from 1.5 to 2.0
+            reward += progress_reward
+            # Cập nhật tracking tiến độ
+            self._progress_tracking["distance_improvement_count"] += 1
+            if current_dist < self._progress_tracking["best_distance_to_goal"]:
+                self._progress_tracking["best_distance_to_goal"] = current_dist
+                self._progress_tracking["no_progress_count"] = 0  # Reset counter khi có tiến bộ thực sự
+            
+        elif dist_diff < 0:  # Đi xa đích
+            # Phạt mạnh hơn khi đi xa đích
+            progress_reward = -1.0  # Kept at -1.0 as per analysis (was already this value)
+            reward += progress_reward
+            self._progress_tracking["no_progress_count"] += 1
+            
+            # Nếu không có tiến bộ trong một thời gian dài, tăng mức phạt
+            if self._progress_tracking["no_progress_count"] > self.map_size * 3:
+                info = {
+                    "termination_reason": "khong_tien_trien",
+                    "truck_state": {
+                        "position": self.current_pos,
+                        "fuel": self.current_fuel,
+                        "money": self.current_money
+                    }
+                }
+                return observation, -10.0, True, False, info
+        
+        # LƯU Ý: Kiểm tra đã đến đích sau khi tính toán reward tiến độ
+        if tuple(self.current_pos) == self.end_pos:
+            # Đã đến đích, thưởng lớn và kết thúc
+            distance_reward = self._calculate_path_efficiency_reward()
+            fuel_reward = self.current_fuel / self.current_episode_max_fuel  # Thưởng thêm nếu còn nhiều nhiên liệu
+            money_reward = self.current_money / self.current_episode_initial_money  # Thưởng thêm nếu còn nhiều tiền
+            
+            # Tổng hợp phần thưởng - tăng phần thưởng cơ bản từ 20.0 lên 25.0
+            total_reward = 25.0 + distance_reward + 5.0 * fuel_reward + 5.0 * money_reward
+            
+            info = {
+                "termination_reason": "den_dich",
+                "truck_state": {
+                    "position": self.current_pos,
+                    "fuel": self.current_fuel,
+                    "money": self.current_money
+                },
+                "path_length": len(self._path_taken),
+                "used_gas_stations": len(set(gas_pos for gas_pos in self._path_taken if self.map_object.grid[gas_pos[1], gas_pos[0]] == CellType.GAS)),
+                "used_toll_stations": len(set(toll_pos for toll_pos in self._path_taken if self.map_object.grid[toll_pos[1], toll_pos[0]] == CellType.TOLL))
+            }
+            return observation, total_reward, True, False, info  # Terminated = True khi đến đích
+        
+        # Kiểm tra hết nhiên liệu
+        if self.current_fuel <= 0:
+            info = {
+                "termination_reason": "het_nhien_lieu",
+                "truck_state": {
+                    "position": self.current_pos,
+                    "fuel": self.current_fuel,
+                    "money": self.current_money
+                }
+            }
+            return observation, -10.0, True, False, info  # Terminated = True khi hết nhiên liệu
+        
+        # Trả về thông tin sau khi di chuyển
+        info = {
+            "termination_reason": "none",
+            "truck_state": {
+                "position": self.current_pos,
+                "fuel": self.current_fuel,
+                "money": self.current_money
+            }
+        }
+        return observation, reward, False, False, info
     
     def _calculate_distance(self, pos1, pos2):
         """
@@ -574,7 +566,7 @@ class TruckRoutingEnv(gym.Env):
         """
         return abs(pos1[0] - pos2[0]) + abs(pos1[1] - pos2[1])
     
-    def render(self, mode='human'):
+    def render(self, mode: str = 'human'):
         """
         Hiển thị môi trường.
         
@@ -613,4 +605,53 @@ class TruckRoutingEnv(gym.Env):
     
     def close(self):
         """Đóng môi trường."""
+        pass 
+
+    def _get_neighbor_positions(self, position):
+        """
+        Lấy danh sách các ô lân cận của một vị trí.
+        
+        Args:
+            position (tuple): Vị trí (x, y) cần lấy lân cận
+            
+        Returns:
+            list: Danh sách các ô lân cận hợp lệ (trong bản đồ)
+        """
+        x, y = position
+        neighbors = []
+        
+        # Thêm 4 ô lân cận nếu chúng nằm trong bản đồ
+        for dx, dy in [(0, -1), (1, 0), (0, 1), (-1, 0)]:  # Lên, phải, xuống, trái
+            nx, ny = x + dx, y + dy
+            # Kiểm tra nằm trong bản đồ
+            if 0 <= nx < self.map_size and 0 <= ny < self.map_size:
+                neighbors.append((nx, ny))
+                
+        return neighbors 
+
+    def _calculate_path_efficiency_reward(self) -> float:
+        """
+        Tính toán phần thưởng dựa trên hiệu quả của đường đi.
+        
+        Returns:
+            float: Phần thưởng cho hiệu quả đường đi (0-10)
+        """
+        # Đường đi tối ưu là khoảng cách Manhattan
+        optimal_path_length = self._calculate_distance(self.start_pos, self.end_pos)
+        
+        # Đường đi thực tế là số bước đã đi
+        actual_path_length = len(self._path_taken)
+        
+        # Tính hiệu quả (tỷ lệ đường đi tối ưu / đường đi thực tế)
+        # Giá trị nhỏ hơn 1 nếu đường đi dài hơn tối ưu
+        efficiency_ratio = min(1.0, optimal_path_length / max(1, actual_path_length))
+        
+        # Thưởng dựa trên hiệu quả đường đi, tối đa 10 điểm
+        return 10.0 * efficiency_ratio 
+
+    def _randomize_obstacles(self):
+        """
+        Phương thức rỗng để tương thích ngược với mã trước đó.
+        Vì chúng ta đã tắt tính năng vật cản di chuyển nên phương thức này không làm gì cả.
+        """
         pass 
