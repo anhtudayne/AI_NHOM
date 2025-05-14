@@ -16,3 +16,4 @@ from .genetic_algorithm import GeneticAlgorithm
 from .ucs import UCS
 from .ids import IDS
 from .idastar import IDAStar
+from .backtracking_csp import BacktrackingCSP

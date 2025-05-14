@@ -21,6 +21,7 @@ from core.algorithms.genetic_algorithm import GeneticAlgorithm
 from core.algorithms.ucs import UCS
 from core.algorithms.ids import IDS
 from core.algorithms.idastar import IDAStar
+from core.algorithms.backtracking_csp import BacktrackingCSP
 from core.rl_environment import TruckRoutingEnv  # Import RL environment
 from core.algorithms.rl_DQNAgent import DQNAgentTrainer  # Import RL agent
 from ui import map_display
@@ -98,7 +99,7 @@ def filter_obstacle_cells(map_data, path):
         
     return filtered_path
 
-def draw_visualization_step(map_data, visited, current_pos, path=None, current_neighbors=None):
+def draw_visualization_step(map_data, visited, current_pos, path=None, current_neighbors=None, is_backtracking=False):
     """Vẽ một bước của quá trình minh họa thuật toán.
     
     Args:
@@ -107,6 +108,7 @@ def draw_visualization_step(map_data, visited, current_pos, path=None, current_n
         current_pos: Vị trí hiện tại đang xét
         path: Đường đi cuối cùng (nếu có)
         current_neighbors: Danh sách các vị trí lân cận của vị trí hiện tại
+        is_backtracking: Cờ đánh dấu đây là bước quay lui (backtracking)
     """
     try:
         # Kiểm tra nếu không có dữ liệu đầu vào
@@ -136,7 +138,8 @@ def draw_visualization_step(map_data, visited, current_pos, path=None, current_n
 
         # Vẽ bản đồ với các thành phần đã được lọc
         map_display.draw_map(map_data, visited=visited, current_pos=current_pos, 
-                           path=path, current_neighbors=current_neighbors)
+                           path=path, current_neighbors=current_neighbors, 
+                           is_backtracking=is_backtracking)
     except Exception as e:
         st.error(f"Lỗi khi vẽ bước minh họa: {str(e)}")
         print(f"Exception in draw_visualization_step: {str(e)}")
@@ -535,6 +538,30 @@ def run_algorithm(algorithm_name: str, map_data: np.ndarray, start: Tuple[int, i
         print(f"Khởi tạo Greedy với: initial_money={initial_money}, max_fuel={max_fuel}, initial_fuel={initial_fuel}")
         algorithm = GreedySearch(grid, initial_money, max_fuel, fuel_per_move, 
                              gas_station_cost, toll_base_cost, initial_fuel)
+    elif algorithm_name == "Backtracking CSP":
+        st.info("""
+        Thuật toán Backtracking CSP sử dụng phương pháp ngẫu nhiên đơn giản để tìm đường đi 
+        với các ràng buộc về nhiên liệu và tiền. Thuật toán sẽ dừng khi:
+        - Tìm thấy đường đi đến đích
+        - Không đủ tiền để đổ xăng khi đến trạm xăng
+        - Hết nhiên liệu khi di chuyển
+        - Không đủ tiền khi đi qua trạm thu phí
+        
+        **Cách hoạt động:**
+        1. Chọn ngẫu nhiên 1 trong 4 hướng (lên, xuống, trái, phải)
+        2. Di chuyển và kiểm tra ràng buộc (nhiên liệu, tiền...)
+        3. Nếu không thỏa mãn ràng buộc, đánh dấu đường đi đó là không khả thi 
+        4. Quay lui và thử hướng khác
+        5. Không thử lại các đường đi đã biết là không khả thi
+        
+        **Hiệu ứng trực quan:**
+        - 🟦 Màu xanh: Ô đã thăm trong quá trình tìm kiếm
+        - 🟧 Màu cam: Các ô lân cận đang xét
+        - 🟥 Màu đỏ + icon 🔙: Biểu thị quá trình quay lui (backtracking)
+        - 🟩 Màu xanh lá: Đường đi cuối cùng tìm được
+        """)
+        algorithm = BacktrackingCSP(grid, initial_money, max_fuel, fuel_per_move, 
+                                 gas_station_cost, toll_base_cost, initial_fuel)
     elif algorithm_name == "Simulated Annealing":
         # Get parameters from session state if available
         initial_temp = st.session_state.get('initial_temp', 100.0)
@@ -737,7 +764,28 @@ def run_algorithm(algorithm_name: str, map_data: np.ndarray, start: Tuple[int, i
     # Chuẩn bị trạng thái cho cả hai chế độ hiển thị
     # 1. Quá trình tìm đường
     # 2. Xe đi theo đường đi cuối cùng
-    exploration_states = [(pos, 0) for pos in clean_visited]  # Trạng thái cho chế độ tìm đường
+    
+    # Kiểm tra nếu thuật toán là BacktrackingCSP, xử lý định dạng đặc biệt
+    is_backtracking_csp = isinstance(algorithm, BacktrackingCSP)
+    
+    if is_backtracking_csp:
+        # BacktrackingCSP sử dụng định dạng (pos, is_forward) cho visited_positions
+        exploration_states = algorithm.visited_positions  # Đã có định dạng (pos, is_forward)
+        print(f"DEBUG: BacktrackingCSP có {len(exploration_states)} exploration_states")
+        
+        # Ghi log một số giá trị để debug
+        for i, (pos, is_forward) in enumerate(exploration_states[:10]):
+            direction = "tiến" if is_forward else "lùi"
+            print(f"  - Bước {i+1}: {direction} tại {pos}")
+        
+        # Cũng có thể in thêm thông tin về debug_path
+        if hasattr(algorithm, 'debug_path') and algorithm.debug_path:
+            print(f"DEBUG: BacktrackingCSP có {len(algorithm.debug_path)} debug_path")
+            for i, (pos, fuel, money) in enumerate(algorithm.debug_path[:5]):
+                print(f"  - Debug path {i+1}: {pos}, fuel={fuel:.1f}, money={money:.1f}")
+    else:
+        # Các thuật toán thông thường
+        exploration_states = [(pos, 0) for pos in clean_visited]  # Trạng thái cho chế độ tìm đường
     
     # Tạo trạng thái di chuyển xe dựa trên đường đi cuối cùng
     truck_states = []
@@ -809,7 +857,7 @@ def render_routing_visualization():
         """, unsafe_allow_html=True)
         
         # Chọn thuật toán
-        algorithm_options = ["BFS", "DFS", "UCS", "IDS", "A*", "IDA*", "Greedy", "Local Beam Search", "Simulated Annealing", "Genetic Algorithm", "Học Tăng Cường (RL)"]
+        algorithm_options = ["BFS", "DFS", "UCS", "IDS", "A*", "IDA*", "Greedy", "Backtracking CSP", "Local Beam Search", "Simulated Annealing", "Genetic Algorithm", "Học Tăng Cường (RL)"]
         algorithm_name = st.selectbox("Chọn thuật toán:", algorithm_options)
         
         # Lưu thuật toán đã chọn vào session state
@@ -824,6 +872,7 @@ def render_routing_visualization():
             "A*": "Tìm kiếm theo A*, kết hợp cả chi phí thực tế và heuristic.",
             "IDA*": "Tìm kiếm IDA* kết hợp giữa tiết kiệm bộ nhớ của tìm kiếm sâu dần và hiệu quả của A*, thích hợp cho bản đồ lớn và phức tạp.",
             "Greedy": "Luôn chọn bước đi tốt nhất theo đánh giá heuristic.",
+            "Backtracking CSP": "Giải quyết bài toán thỏa mãn ràng buộc, xây dựng đường đi bằng cách thử và quay lui khi gặp vi phạm các ràng buộc về nhiên liệu và tiền.",
             "Local Beam Search": "Theo dõi k trạng thái cùng lúc thay vì một trạng thái duy nhất.",
             "Simulated Annealing": "Mô phỏng quá trình luyện kim, cho phép chấp nhận giải pháp tệ hơn với xác suất giảm dần theo thời gian.",
             "Genetic Algorithm": "Mô phỏng quá trình tiến hóa tự nhiên, sử dụng quần thể, chọn lọc, lai ghép và đột biến.",
@@ -897,6 +946,31 @@ def render_routing_visualization():
                 st.checkbox("Sử dụng Stochastic Beam Search", 
                                 value=st.session_state.get('use_stochastic', True),
                                 key='use_stochastic')
+            
+            elif algorithm_name == "Backtracking CSP":
+                st.info("""
+        Thuật toán Backtracking CSP sử dụng phương pháp ngẫu nhiên đơn giản để tìm đường đi 
+        với các ràng buộc về nhiên liệu và tiền. Thuật toán sẽ dừng khi:
+        - Tìm thấy đường đi đến đích
+        - Không đủ tiền để đổ xăng khi đến trạm xăng
+        - Hết nhiên liệu khi di chuyển
+        - Không đủ tiền khi đi qua trạm thu phí
+        
+        **Cách hoạt động:**
+        1. Chọn ngẫu nhiên 1 trong 4 hướng (lên, xuống, trái, phải)
+        2. Di chuyển và kiểm tra ràng buộc (nhiên liệu, tiền...)
+        3. Nếu không thỏa mãn ràng buộc, đánh dấu đường đi đó là không khả thi 
+        4. Quay lui và thử hướng khác
+        5. Không thử lại các đường đi đã biết là không khả thi
+        
+        **Hiệu ứng trực quan:**
+        - 🟦 Màu xanh: Ô đã thăm trong quá trình tìm kiếm
+        - 🟧 Màu cam: Các ô lân cận đang xét
+        - 🟥 Màu đỏ + icon 🔙: Biểu thị quá trình quay lui (backtracking)
+        - 🟩 Màu xanh lá: Đường đi cuối cùng tìm được
+        """)
+                
+                # Đã loại bỏ tham số ngẫu nhiên vì thuật toán luôn sử dụng lựa chọn ngẫu nhiên đơn giản
             
             elif algorithm_name == "Simulated Annealing":
                 st.slider("Nhiệt độ ban đầu:", min_value=10.0, max_value=500.0, 
@@ -1355,9 +1429,28 @@ def render_routing_visualization():
             # Xử lý trực quan hóa theo chế độ đã chọn
             if visualization_mode == "1. Quá trình tìm đường":
                 if st.session_state.is_playing and current_step < total_steps:
+                    # Kiểm tra xem thuật toán có phải là BacktrackingCSP không
+                    algorithm_is_backtracking_csp = st.session_state.algorithm == "Backtracking CSP"
+                    
                     # Hiển thị bản đồ với các ô đã thăm
-                    current_visited = visited[:current_step + 1]
-                    current_pos = visited[current_step]
+                    if algorithm_is_backtracking_csp:
+                        # Xử lý định dạng đặc biệt của BacktrackingCSP
+                        exploration_states = st.session_state.current_result["exploration_states"]
+                        pos_tuples = exploration_states[:current_step + 1]
+                        # Tách riêng vị trí và thông tin quay lui
+                        current_visited = [pos for pos, is_forward in pos_tuples if is_forward]
+                        current_pos, is_forward = pos_tuples[current_step]
+                        is_backtracking = not is_forward
+                        
+                        # Hiển thị thông tin về quá trình backtracking
+                        if is_backtracking:
+                            # Hiển thị thông báo quay lui
+                            st.warning(f"🔙 **QUAY LUI tại {current_pos}**: Thuật toán đang quay lui từ vị trí này vì không tìm được đường đi tiếp theo thỏa mãn ràng buộc.", icon="↩️")
+                    else:
+                        # Xử lý định dạng thông thường
+                        current_visited = visited[:current_step + 1]
+                        current_pos = visited[current_step]
+                        is_backtracking = False
                     
                     # Lấy các ô hàng xóm của vị trí hiện tại
                     current_neighbors = []
@@ -1371,7 +1464,8 @@ def render_routing_visualization():
                             current_visited,
                             current_pos,
                             None,  # Không hiển thị đường đi khi đang tìm đường
-                            current_neighbors
+                            current_neighbors,
+                            is_backtracking=is_backtracking
                         )
                     
                     # Tăng bước và đợi
@@ -1381,8 +1475,27 @@ def render_routing_visualization():
                 else:
                     # Hiển thị trạng thái hiện tại
                     if current_step < total_steps:
-                        current_visited = visited[:current_step + 1]
-                        current_pos = visited[current_step]
+                        # Kiểm tra xem thuật toán có phải là BacktrackingCSP không
+                        algorithm_is_backtracking_csp = st.session_state.algorithm == "Backtracking CSP"
+                        
+                        if algorithm_is_backtracking_csp:
+                            # Xử lý định dạng đặc biệt của BacktrackingCSP
+                            exploration_states = st.session_state.current_result["exploration_states"]
+                            pos_tuples = exploration_states[:current_step + 1]
+                            # Tách riêng vị trí và thông tin quay lui
+                            current_visited = [pos for pos, is_forward in pos_tuples if is_forward]
+                            current_pos, is_forward = pos_tuples[current_step]
+                            is_backtracking = not is_forward
+                            
+                            # Hiển thị thông tin về quá trình backtracking nếu đang quay lui
+                            if is_backtracking:
+                                st.warning(f"🔙 **QUAY LUI tại {current_pos}**: Thuật toán đang quay lui từ vị trí này vì không tìm được đường đi tiếp theo thỏa mãn ràng buộc.", icon="↩️")
+                        else:
+                            # Xử lý định dạng thông thường
+                            current_visited = visited[:current_step + 1]
+                            current_pos = visited[current_step]
+                            is_backtracking = False
+                        
                         current_neighbors = []
                         if hasattr(st.session_state.map, 'get_neighbors'):
                             current_neighbors = st.session_state.map.get_neighbors(current_pos)
@@ -1395,16 +1508,22 @@ def render_routing_visualization():
                                 current_visited,
                                 current_pos,
                                 display_path,
-                                current_neighbors
+                                current_neighbors,
+                                is_backtracking=is_backtracking
                             )
                     else:
                         # Hiển thị kết quả cuối cùng với đường đi
                         with map_container:
+                            # Đường đi cuối cùng sẽ luôn sử dụng best_path từ kết quả
+                            final_path = path
+                            # Debug info
+                            st.info(f"Đang hiển thị đường đi cuối cùng với {len(final_path)-1 if final_path else 0} bước")
+                            
                             draw_visualization_step(
                                 st.session_state.map,
-                                visited,
+                                visited if not st.session_state.algorithm == "Backtracking CSP" else [pos for pos, is_forward in visited if is_forward],
                                 None,
-                                path  # Chỉ hiển thị đường đi ở bước cuối cùng
+                                final_path  # Sử dụng đường đi cuối cùng từ kết quả
                             )
             else:
                 # Chế độ 2: Hiển thị quá trình xe di chuyển trên đường đi cuối cùng

@@ -328,7 +328,7 @@ def find_path_between(grid, start, end):
     # Không tìm thấy đường đi
     return None
 
-def draw_map(map_data, start_pos=None, visited=None, current_neighbors=None, current_pos=None, path=None):
+def draw_map(map_data, start_pos=None, visited=None, current_neighbors=None, current_pos=None, path=None, is_backtracking=False):
     """
     Vẽ bản đồ với các icon sử dụng thành phần bản địa của Streamlit
     
@@ -339,6 +339,7 @@ def draw_map(map_data, start_pos=None, visited=None, current_neighbors=None, cur
     - current_neighbors: List các vị trí hàng xóm đang xét (x,y)
     - current_pos: Tuple (x,y) chỉ vị trí hiện tại
     - path: List các vị trí (x,y) trên đường đi tìm được
+    - is_backtracking: Boolean chỉ ra nếu vị trí hiện tại là bước quay lui
     """
     try:
         # Lấy grid từ map_data một cách nhất quán
@@ -354,7 +355,7 @@ def draw_map(map_data, start_pos=None, visited=None, current_neighbors=None, cur
         # Ghi log các thông tin debug giúp theo dõi vấn đề start_pos
         if start_pos is None:
             print("INFO: start_pos chưa được thiết lập")
-            print(f"DEBUG: start_pos = {start_pos}, kiểu: {type(start_pos)}")
+            print(f"DEBUG: start_pos = {start_pos}, kiểu: {type(start_pos) if start_pos else None}")
             if hasattr(map_data, 'start_pos'):
                 print(f"DEBUG: map_data.start_pos = {map_data.start_pos}, kiểu: {type(map_data.start_pos)}")
             
@@ -506,6 +507,18 @@ def draw_map(map_data, start_pos=None, visited=None, current_neighbors=None, cur
             animation: highlightPulse 1.2s infinite;
         }
         
+        .backtrack-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: rgba(255, 0, 0, 0.15) !important;
+            z-index: 3;
+            animation: backtrackPulse 0.8s infinite;
+            border: 2px dashed rgba(255, 0, 0, 0.5) !important;
+        }
+        
         .path-overlay {
             position: absolute;
             top: 0;
@@ -543,6 +556,12 @@ def draw_map(map_data, start_pos=None, visited=None, current_neighbors=None, cur
             0% { background-color: rgba(255, 69, 0, 0.08) !important; }
             50% { background-color: rgba(255, 69, 0, 0.15) !important; }
             100% { background-color: rgba(255, 69, 0, 0.08) !important; }
+        }
+        
+        @keyframes backtrackPulse {
+            0% { background-color: rgba(255, 0, 0, 0.15) !important; }
+            50% { background-color: rgba(255, 0, 0, 0.3) !important; }
+            100% { background-color: rgba(255, 0, 0, 0.15) !important; }
         }
         
         @keyframes pathGlow {
@@ -671,7 +690,16 @@ def draw_map(map_data, start_pos=None, visited=None, current_neighbors=None, cur
                     overlays += '<div class="neighbor-overlay"></div>'
                 # current_pos_for_display là (x,y)
                 if current_pos_for_display and current_cell_xy == current_pos_for_display:
-                    overlays += '<div class="current-overlay"></div>'
+                    if is_backtracking:
+                        overlays += '<div class="backtrack-overlay"></div>'
+                        # Thay đổi icon xe khi quay lui
+                        if cell_content.find("truck-icon") > -1:
+                            cell_content = """<span class='truck-icon' style='
+                                            font-size: 40px !important; 
+                                            filter: drop-shadow(0 2px 5px rgba(0,0,0,0.2)); 
+                                            color: #FF0000;'>🔙</span>"""
+                    else:
+                        overlays += '<div class="current-overlay"></div>'
                 
                 # Xử lý đường đi (path chứa (x,y))
                 if path and current_cell_xy in path:

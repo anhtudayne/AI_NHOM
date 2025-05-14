@@ -1,0 +1,84 @@
+{
+  "timestamp": {
+    "value": "20250514_123613",
+    "comment": "Thời gian chạy thuật toán"
+  },
+  "algorithm": {
+    "value": "BFS",
+    "comment": "Tên thuật toán sử dụng"
+  },
+  "map_size": {
+    "value": "",
+    "comment": "Kích thước bản đồ (rows x cols)"
+  },
+  "search_process": {
+    "steps": {
+      "value": 14,
+      "comment": "Số bước thực hiện"
+    },
+    "visited_cells": {
+      "value": 0,
+      "comment": "Số ô đã thăm"
+    },
+    "path_length": {
+      "value": 5,
+      "comment": "Độ dài đường đi tìm được"
+    }
+  },
+  "fuel_info": {
+    "initial_fuel": {
+      "value": 5.0,
+      "comment": "Nhiên liệu ban đầu (L)"
+    },
+    "remaining_fuel": {
+      "value": 5.0,
+      "comment": "Nhiên liệu còn lại (L)"
+    },
+    "fuel_consumed": {
+      "value": 5.0,
+      "comment": "Nhiên liệu đã tiêu thụ (L)"
+    }
+  },
+  "costs": {
+    "total_cost": {
+      "value": 0.0,
+      "comment": "Tổng chi phí (đ)"
+    },
+    "fuel_cost": {
+      "value": 0.0,
+      "comment": "Chi phí nhiên liệu (đ)"
+    },
+    "toll_cost": {
+      "value": 0.0,
+      "comment": "Chi phí trạm thu phí (đ)"
+    },
+    "initial_money": {
+      "value": 2000.0,
+      "comment": "Số tiền ban đầu (đ)"
+    },
+    "remaining_money": {
+      "value": 2000.0,
+      "comment": "Số tiền còn lại (đ)"
+    }
+  },
+  "performance": {
+    "execution_time": {
+      "value": 0.027638699999442906,
+      "comment": "Thời gian thực thi (giây)"
+    },
+    "memory_usage": {
+      "value": 224,
+      "comment": "Bộ nhớ sử dụng (MB)"
+    }
+  },
+  "feasibility": {
+    "is_feasible": {
+      "value": true,
+      "comment": "Đường đi có khả thi không"
+    },
+    "reason": {
+      "value": "Đường đi khả thi (đúng bằng giới hạn nhiên liệu 5.0L)",
+      "comment": "Lý do nếu không khả thi"
+    }
+  }
+}
