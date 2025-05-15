@@ -49,7 +49,7 @@ Người dùng có thể:
 
 ## 🔍 THUẬT TOÁN
 
-<!-- [BIỂU ĐỒ: Chèn biểu đồ so sánh hiệu suất các thuật toán] -->
+
 
 Ứng dụng tích hợp và phân tích nhiều thuật toán tìm đường khác nhau:
 
@@ -68,7 +68,6 @@ Mỗi thuật toán được triển khai với đầy đủ các tùy chọn th
 
 ## 📊 ĐÁNH GIÁ HIỆU SUẤT
 
-<!-- [BIỂU ĐỒ: Chèn biểu đồ đánh giá hiệu suất các thuật toán trên các loại bản đồ khác nhau] -->
 
 Ứng dụng cung cấp hệ thống đánh giá hiệu suất toàn diện với các tiêu chí:
 
@@ -274,4 +273,4 @@ Dự án đã đạt được nhiều kết quả nghiên cứu quan trọng:
 
 
 
-Được phát triển với 💻 và ❤️ bởi [AI_NHOM](https://github.com/AI_NHOM)
+Được phát triển với 💻 và ❤️ bởi Thắng và Tú

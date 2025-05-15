@@ -103,7 +103,7 @@ def aggregate_metrics(df_all_runs: pd.DataFrame) -> pd.DataFrame:
     """Gom nhóm và tính toán các số liệu thống kê tổng hợp cho mỗi thuật toán."""
     if df_all_runs.empty:
         return pd.DataFrame()
-        
+
     # Bảng thống kê chuyên nghiệp hơn
     metrics_of_interest = {
         'execution_time_ms': 'Thời Gian (ms)', 
@@ -296,7 +296,7 @@ def render_evaluation_page():
         <p style="color: white; opacity: 0.9; margin-top: 5px;">So sánh và phân tích toàn diện kết quả chạy của tất cả các thuật toán tìm đường.</p>
     </div>
     """, unsafe_allow_html=True)
-    
+
     # Thêm thông tin mô tả cách sử dụng
     with st.expander("ℹ️ Hướng dẫn sử dụng"):
         st.markdown("""
@@ -316,7 +316,7 @@ def render_evaluation_page():
         
         **Lưu ý**: Nếu bạn không thấy đầy đủ các thuật toán, có thể các thuật toán đó chưa được chạy hoặc chưa lưu thống kê.
         """)
-    
+
     stat_files = get_stat_files()
 
     if not stat_files:
@@ -351,7 +351,6 @@ def render_evaluation_page():
     @st.cache_data(ttl=30) # Chỉ cache trong 30 giây
     def load_metrics_data(files):
         metrics_data = []
-        total_files = len(files)
         for idx, filename in enumerate(files):
             raw_data = load_json_data(filename)
             if raw_data:
@@ -365,7 +364,7 @@ def render_evaluation_page():
     if not all_metrics_data:
         st.error("❌ Không thể tải hoặc xử lý dữ liệu từ các file đã chọn.")
         return
-    
+
     # Chuyển đổi thành dataframe và sắp xếp
     df_all_runs = pd.DataFrame(all_metrics_data)
     
@@ -744,7 +743,7 @@ def render_evaluation_page():
                 st.dataframe(filtered_stats.style
                             .set_sticky(axis="index")
                             .background_gradient(cmap='viridis_r', subset=pd.IndexSlice[:, [col for col in filtered_stats.columns if 'TB' in col]])
-                            .set_properties(**{'text-align': 'right'})
+                                               .set_properties(**{'text-align': 'right'})
                             .set_table_styles([dict(selector='th', props=[('text-align', 'center')])]),
                             use_container_width=True)
         else:
@@ -796,10 +795,10 @@ def render_evaluation_page():
                             algo_data = df_radar[df_radar["algorithm"] == algo]
                             if not algo_data.empty:
                                 values = []
-                                for metric in selected_radar_metrics_original:
-                                    if metric in algo_data:
+                                for metric_key in selected_radar_metrics_original: # Đổi tên biến để tránh nhầm lẫn
+                                    if metric_key in algo_data:
                                         # Lấy giá trị đầu tiên hoặc 0 nếu không có hoặc là NaN
-                                        value = algo_data[metric].iloc[0]
+                                        value = algo_data[metric_key].iloc[0]
                                         values.append(0 if pd.isna(value) else value)
                                     else:
                                         values.append(0)
