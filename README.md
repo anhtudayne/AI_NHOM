@@ -4,7 +4,8 @@
 
 ## 📋 TỔNG QUAN
 
-<!-- [GIF DEMO: Chèn GIF mô phỏng demo của ứng dụng tại đây] -->
+![Demo](https://github.com/anhtudayne/AI_NHOM/blob/main/truck_routing_app/image/demo.gif?raw=true)
+
 
 Ứng dụng mô phỏng đường đi là một công cụ mạnh mẽ được phát triển bởi nhóm AI_NHOM để mô phỏng, trực quan hóa và tối ưu hóa các tuyến đường vận chuyển. Được xây dựng trên nền tảng Streamlit với backend Python, ứng dụng này cung cấp một môi trường nghiên cứu và thử nghiệm toàn diện cho việc phân tích các thuật toán tìm đường.
 
@@ -68,6 +69,11 @@ Mỗi thuật toán được triển khai với đầy đủ các tùy chọn th
 
 ## 📊 ĐÁNH GIÁ HIỆU SUẤT
 
+![Image 1](https://github.com/anhtudayne/AI_NHOM/blob/main/truck_routing_app/image/1.png?raw=true)
+![Image 2](https://github.com/anhtudayne/AI_NHOM/blob/main/truck_routing_app/image/2.png?raw=true)
+![Image 3](https://github.com/anhtudayne/AI_NHOM/blob/main/truck_routing_app/image/3.png?raw=true)
+![Image 4](https://github.com/anhtudayne/AI_NHOM/blob/main/truck_routing_app/image/4.png?raw=true)
+![Image 5](https://github.com/anhtudayne/AI_NHOM/blob/main/truck_routing_app/image/5.png?raw=true)
 
 Ứng dụng cung cấp hệ thống đánh giá hiệu suất toàn diện với các tiêu chí:
 
